@@ -202,17 +202,17 @@ THD_API void THDTensor_(baddbmm)(THDTensor *self, real beta, THDTensor *src,
 THD_API void THDTensor_(match)(THDTensor *self, THDTensor *m1,
                                THDTensor *m2, real gain);
 THD_API void THDTensor_(max)(THDTensor *self, THLongTensor *indices_,
-                             THDTensor *src, int dimension);
+                             THDTensor *src, int dimension, int keepdim);
 THD_API void THDTensor_(min)(THDTensor *self, THLongTensor *indices_,
-                             THDTensor *src, int dimension);
+                             THDTensor *src, int dimension, int keepdim);
 THD_API void THDTensor_(kthvalue)(THDTensor *self, THLongTensor *indices_,
-                                  THDTensor *src, long k, int dimension);
+                                  THDTensor *src, long k, int dimension, int keepdim);
 THD_API void THDTensor_(mode)(THDTensor *self, THLongTensor *indices_,
-                              THDTensor *src, int dimension);
+                              THDTensor *src, int dimension, int keepdim);
 THD_API void THDTensor_(median)(THDTensor *self, THLongTensor *indices_,
-                                THDTensor *src, int dimension);
-THD_API void THDTensor_(sum)(THDTensor *self, THDTensor *src, int dimension);
-THD_API void THDTensor_(prod)(THDTensor *self, THDTensor *src, int dimension);
+                                THDTensor *src, int dimension, int keepdim);
+THD_API void THDTensor_(sum)(THDTensor *self, THDTensor *src, int dimension, int keepdim);
+THD_API void THDTensor_(prod)(THDTensor *self, THDTensor *src, int dimension, int keepdim);
 THD_API void THDTensor_(cumsum)(THDTensor *self, THDTensor *src, int dimension);
 THD_API void THDTensor_(cumprod)(THDTensor *self, THDTensor *src, int dimension);
 THD_API void THDTensor_(sign)(THDTensor *self, THDTensor *src);
