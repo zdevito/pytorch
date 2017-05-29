@@ -594,29 +594,54 @@ def pixel_shuffle(input, upscale_factor):
 def upsample_nearest(input, size=None, scale_factor=None):
     """Upsamples the input, using nearest neighbours' pixel values.
 
-    Currently only spatial upsampling is supported (i.e. expected inputs
-    are 4 dimensional).
+    Currently spatial and volumetric upsampling are supported (i.e. expected inputs
+    are 4 or 5 dimensional).
 
     Args:
         input (Variable): input
-        size (int or Tuple[int, int]): output spatial size.
+        size (int or Tuple[int, int] or Tuple[int, int, int]): output spatial size.
         scale_factor (int): multiplier for spatial size. Has to be an integer.
     """
-    return _functions.thnn.UpsamplingNearest2d(size, scale_factor)(input)
+    if input.dim() == 4:
+        assert type(size) == int or len(size) == 2, '4D tensors expect size as int or Tuple[int, int]'
+        return _functions.thnn.UpsamplingNearest2d(_pair(size), scale_factor)(input)
+    elif input.dim() == 5:
+        assert type(size) == int or len(size) == 3, '5D tensors expect size as int or Tuple[int, int, int]'
+        return _functions.thnn.UpsamplingNearest3d(_triple(size), scale_factor)(input)
+    else:
+        raise NotImplementedError("Only 4D and 5D upsampling is supported for now")
 
 
 def upsample_bilinear(input, size=None, scale_factor=None):
-    """Upscales the input, using the bilinear upsampling.
+    """Upscales the input, using bilinear upsampling.
 
-    Currently only spatial upsampling is supported (i.e. expected inputs
-    are 4 dimensional).
+    Expected inputs are spatial (4 dimensional). Use upsample_trilinear for volumetric (5 dimensional)
+    inputs.
 
     Args:
         input (Variable): input
         size (int or Tuple[int, int]): output spatial size.
         scale_factor (int or Tuple[int, int]): multiplier for spatial size
     """
-    return _functions.thnn.UpsamplingBilinear2d(size, scale_factor)(input)
+    assert input.dim() == 4, "4D tensors expected in input"
+    assert type(size) == int or len(size) == 2, '4D tensors expect size as int or Tuple[int, int]'
+    return _functions.thnn.UpsamplingBilinear2d(_pair(size), scale_factor)(input)
+
+
+def upsample_trilinear(input, size=None, scale_factor=None):
+    """Upscales the input, using trilinear upsampling.
+
+    Expected inputs are volumetric (5 dimensional). Use upsample_bilinear for spatial (4 dimensional)
+    inputs.
+
+    Args:
+        input (Variable): input
+        size (int or Tuple[int, int, int]): output spatial size.
+        scale_factor (int): multiplier for spatial size. Has to be an integer.
+    """
+    assert input.dim() == 5, "5D tensors expected in input"
+    assert type(size) == int or len(size) == 3, '5D tensors expect size as int or Tuple[int, int, int]'
+    return _functions.thnn.UpsamplingTrilinear3d(_triple(size), scale_factor)(input)
 
 
 def _check_bilinear_2d_scale_factor(scale_factor):

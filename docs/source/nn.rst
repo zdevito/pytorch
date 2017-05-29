@@ -531,6 +531,18 @@ Vision layers
 .. autoclass:: UpsamplingBilinear2d
     :members:
 
+:hidden:`UpsamplingNearest3d`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: UpsamplingNearest3d
+    :members:
+
+:hidden:`UpsamplingTrilinear3d`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: UpsamplingTrilinear3d
+    :members:
+
 
 Multi-GPU layers
 ----------------
@@ -866,6 +878,22 @@ Vision functions
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: pad
+
+:hidden:`upsample_nearest`
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: upsample_nearest
+
+:hidden:`upsample_bilinear`
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: upsample_bilinear
+
+:hidden:`upsample_trilinear`
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: upsample_trilinear
+
 
 torch.nn.init
 =============
