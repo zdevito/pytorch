@@ -694,7 +694,7 @@ static void _trace_create(PyObject* op_obj, THPFunction* bw_obj,
     // NOTE: normally we don't add Select nodes when there's only a single
     // output, but Python nodes can't be optimized away, so we simplify the
     // code here.
-    Node* sel = graph->appendNode(graph->createSelect(this_expr, i));
+    Node* sel = this_expr->addOutput();
     sel->inferTypeFrom(output.data());
     tracer::setValueTrace(tracing_state, output, sel);
   }
@@ -708,7 +708,7 @@ static void _trace_create(PyObject* op_obj, THPFunction* bw_obj,
   // subgraphs AND we don't even materialize the forward function).
   if (!passes_state_transparently) {
     tracer::nontraceableBackwardSubgraph(input_vars, output_vars);
-    Function::setUpContextEdge(this_expr, num_outputs, input_vars, output_vars);
+    Function::setUpContextEdge(this_expr, input_vars, output_vars);
   }
 }
 

@@ -89,7 +89,7 @@ def _op(self, opname, *args, **kwargs):
     n = self.appendNode(_newNode(self, opname, *args, **kwargs))
     if outputs == 1:
         return n
-    return tuple(self.appendNode(self.createSelect(n, i)) for i in _range(outputs))
+    return n.outputs()
 
 
 torch._C.Graph.op = _op

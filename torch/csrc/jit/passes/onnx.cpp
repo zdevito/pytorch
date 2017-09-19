@@ -93,16 +93,10 @@ void ToONNX(std::shared_ptr<tracer::TracingState>& state) {
   auto cloneNode = [&](Node * node) {
     auto n_ = ctx.graph->createClone(node, envFn);
     ctx.graph->appendNode(n_);
-    if (node->hasMultipleOutputs()) {
-      int i = 0;
-      for(auto s : node->uses()) {
-        auto new_node = ctx.graph->createSelect(n_,i++);
-        ctx.graph->appendNode(new_node);
-        new_node->setType(s.user->typeOption());
-        env[s.user] = new_node;
-      }
-    } else {
-      env[node] = n_;
+    int i = 0;
+    auto new_outputs = n_->outputs();
+    for(auto output : node->outputs()) {
+      env[output] = new_outputs[i++];
     }
   };
 

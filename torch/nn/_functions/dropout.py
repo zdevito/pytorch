@@ -14,11 +14,11 @@ class Dropout(InplaceFunction):
     def symbolic(g, input, p=0.5, train=False, inplace=False):
         if inplace:
             return None
-        n = g.appendNode(g.create("Dropout", [input])
+        n = g.appendNode(g.createMultiOutput("Dropout", [input], 0)
                           .f_("ratio", p)
                           .i_("is_test", not train))
-        real = g.appendNode(g.createSelect(n, 0))
-        g.appendNode(g.createSelect(n, 1))
+        real = n.addOutput()
+        n.addOutput()
         return real
 
     @classmethod

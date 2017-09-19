@@ -63,7 +63,7 @@ jit::node_list ConvForward::symbolic(SymbolicContext* ctx, jit::node_list inputs
 
   if (inputs.at(2)->kind() != jit::kUndefined) {
     // TODO: Set type here based on RETURN type (not available atm)
-    auto a_n = g->create(jit::kAdd, {g->appendNode(g->createSelect(n, 0)), inputs.at(2)});
+    auto a_n = g->create(jit::kAdd, {n, inputs.at(2)});
     a_n->i_(jit::kbroadcast, 1);
     a_n->i_(jit::kaxis, 1);
     g->appendNode(a_n);

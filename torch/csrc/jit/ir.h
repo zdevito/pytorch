@@ -489,6 +489,7 @@ public:
   // and appends it after this in the graph.
   // New node inherits the type of this.
   Node* makeMultireturn();
+  Node* addOutput();
 
   // iterators of the node list starting at this node
   // useful for resuming a search starting at this node
@@ -747,27 +748,25 @@ public:
   }
 
   Node * create(NodeKind kind, ArrayRef<Node*> inputs) {
-    auto n = new Node(this,kind);
+    auto n = create(kind);
     for(auto i : inputs)
       n->addInput(i);
     return n;
   }
 
-  // Select nodes are used to handle multiple returns for the ops that actually return
-  // multiple values like PythonOp
-  // By convention, there is a unique select node for each output of an op
-  // so you can iterate over uses of a multi-return op to get all the select nodes.
-  // in this case
-  // number_of_outputs = op.uses().size()
-  // this will change if Tuples ever become first class.
 
-  Node * createSelect(Node * n, int64_t offset) {
-    if(!n->hasType())
-      n->setType(multiType());
-    JIT_ASSERTM(n->hasMultipleOutputs(), "trying to select from a node that doesn't return multiple outputs");
-    auto r = create(kSelect,{n});
-    r->i_(kOffset,offset);
-    return r;
+  Node * createMultiOutput(NodeKind kind, ArrayRef<Node*> inputs, size_t num_outputs) {
+    auto n = new Node(this,kind);
+    for(auto i : inputs)
+      n->addInput(i);
+    n->setType(multiType());
+    for(size_t i = 0; i < num_outputs; i++) {
+      createSelect(n, i);
+    }
+    return n;
+  }
+  Node * createMultiOutput(NodeKind kind, size_t num_outputs) {
+    return createMultiOutput(kind, {}, num_outputs);
   }
 
   Node * createUndefined() {
@@ -781,7 +780,7 @@ public:
     return n;
   }
   Node * createFusionGroup() {
-    auto n = create(kFusionGroup);
+    auto n = createMultiOutput(kFusionGroup, 0);
     n->g_(kSubgraph,std::make_shared<Graph>());
     return n;
   }
@@ -825,6 +824,20 @@ public:
   friend std::ostream& operator<<(std::ostream & out, Graph & g);
 
 private:
+  // Select nodes are used to handle multiple returns for the ops that actually return
+  // multiple values like PythonOp
+  // By convention, there is a unique select node for each output of an op
+  // so you can iterate over uses of a multi-return op to get all the select nodes.
+  // in this case
+  // number_of_outputs = op.uses().size()
+  // this will change if Tuples ever become first class.
+
+  Node * createSelect(Node * n, int64_t offset) {
+    JIT_ASSERTM(n->hasMultipleOutputs(), "trying to select from a node that doesn't return multiple outputs");
+    auto r = create(kSelect,{n});
+    r->i_(kOffset,offset);
+    return r;
+  }
 
   void freeNode(Node * n) {
     auto it = all_nodes.find(n);
@@ -851,16 +864,19 @@ inline void Node::destroy() {
   graph_->freeNode(this);
 }
 
-inline Node* Node::makeMultireturn() {
+inline Node* Node::makeMultiOutput() {
   JIT_ASSERT(!hasMultipleOutputs());
   Node *select = graph_->create(kSelect);
   select->i_(kOffset, 0);
   select->setType(type_);
   replaceAllUsesWith(select);
   select->addInput(this);
-  select->insertAfter(this);
   setType(multiType());
   return select;
+}
+inline Node* Node::addOutput() {
+  JIT_ASSERT(hasMultipleOutputs());
+  return graph_->createSelect(this, uses().size());
 }
 
 // Helper macros for constructing switch statements over Node types

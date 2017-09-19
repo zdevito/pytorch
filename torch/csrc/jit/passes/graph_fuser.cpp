@@ -146,9 +146,8 @@ struct GraphFuser {
     group->insertBefore(n);
     Node * mergedNode = mergeNodeIntoGroup(group,n);
     getSubgraph(group).registerOutput(mergedNode);
-    auto sel = graph->createSelect(group,0);
+    auto sel = group->addOutput();
     sel->setType(n->typeOption());
-    sel->insertAfter(group);
     n->replaceAllUsesWith(sel);
     n->destroy();
     return group;
@@ -169,10 +168,9 @@ struct GraphFuser {
     // if these exist, re-route them to the version of producer
     // created in FusionGroup
     if(producer->uses().size() != 0) {
-      size_t offset = getSubgraph(group).registerOutput(merged);
-      Node * new_producer = graph->createSelect(group,offset);
+      getSubgraph(group).registerOutput(merged);
+      Node * new_producer = group->addOutput();
       new_producer->setType(producer->typeOption());
-      insertAfter(new_producer, group);
       producer->replaceAllUsesWith(new_producer);
     }
     producer->destroy();

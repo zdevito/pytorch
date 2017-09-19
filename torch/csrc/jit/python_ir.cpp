@@ -34,7 +34,12 @@ void initPythonIRBindings(PyObject * module_) {
     .def("create",[](Graph & g, const char * str, const std::vector<Node*> & inputs) {
       return g.create(stringToSymbol(str),inputs);
     })
-    .GS(createSelect)
+    .def("create",[](Graph & g, const char * str, size_t num_outputs) {
+      return g.create(stringToSymbol(str), num_outputs);
+    })
+    .def("create",[](Graph & g, const char * str, const std::vector<Node*> & inputs, size_t num_outputs) {
+      return g.create(stringToSymbol(str), inputs, num_outputs);
+    })
     .GS(createConstant)
     .GS(createFusionGroup)
     .def("createClone",[](Graph & g, Node * n, py::object fn) {

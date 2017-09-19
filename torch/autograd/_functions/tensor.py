@@ -586,11 +586,8 @@ class Chunk(Function):
             lengths.append(this_split_size)
             dim_size = dim_size - split_size
             count_chunks = count_chunks + 1
-        result = []
-        n = g.appendNode(g.create("Split", [i]).is_("split", lengths).i_("axis", dim))
-        for i in range(count_chunks):
-            result.append(g.appendNode(g.createSelect(n, i)))
-        return tuple(result)
+        n = g.appendNode(g.create("Split", [i], count_chunks).is_("split", lengths).i_("axis", dim))
+        return n.outputs()
 
     @staticmethod
     def forward(ctx, i, num_chunks, dim=0):
