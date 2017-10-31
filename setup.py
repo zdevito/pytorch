@@ -435,6 +435,7 @@ main_sources = [
     "torch/csrc/allocators.cpp",
     "torch/csrc/serialization.cpp",
     "torch/csrc/jit/init.cpp",
+    "torch/csrc/jit/interpreter.cpp",
     "torch/csrc/jit/ir.cpp",
     "torch/csrc/jit/python_ir.cpp",
     "torch/csrc/jit/test_jit.cpp",
@@ -538,12 +539,13 @@ if WITH_CUDA:
         nvtoolext_lib_name = 'nvToolsExt'
 
     library_dirs.append(cuda_lib_path)
+    library_dirs.append(cuda_lib_path+'/stubs')
     cuda_include_path = os.path.join(CUDA_HOME, 'include')
     include_dirs.append(cuda_include_path)
     include_dirs.append(tmp_install_path + "/include/THCUNN")
     extra_compile_args += ['-DWITH_CUDA']
     extra_compile_args += ['-DCUDA_LIB_PATH=' + cuda_lib_path]
-    main_libraries += ['cudart', nvtoolext_lib_name]
+    main_libraries += ['cudart', nvtoolext_lib_name, 'nvidia-ml']
     main_sources += [
         "torch/csrc/cuda/Module.cpp",
         "torch/csrc/cuda/Storage.cpp",
