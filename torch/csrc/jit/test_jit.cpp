@@ -10,6 +10,328 @@
 #include "torch/csrc/jit/interned_strings.h"
 #include <vector>
 
+
+
+#include "torch/csrc/jit/benchmark_common.h"
+
+
+at::Tensor t_use(at::Tensor x) {
+  return x;
+}
+at::Tensor t_def(at::Tensor x) {
+  return x.t();
+}
+
+std::pair<at::Tensor, at::Tensor>
+lstm(at::Tensor input,
+      at::Tensor hx,
+      at::Tensor cx,
+      at::Tensor w_ih,
+      at::Tensor w_hh) {
+  auto gates = input.mm(t_use(w_ih)) + hx.mm(t_use(w_hh));
+
+  auto chunked_gates = gates.chunk(4, 1);
+  auto ingate     = chunked_gates[0];
+  auto forgetgate = chunked_gates[1];
+  auto cellgate = chunked_gates[2];
+  auto outgate    = chunked_gates[3];
+
+  ingate = ingate.sigmoid();
+  outgate = outgate.sigmoid();
+  cellgate = cellgate.tanh();
+  forgetgate = forgetgate.sigmoid();
+
+  auto cy = (forgetgate * cx) + (ingate * cellgate);
+  auto hy = outgate * cy.tanh();
+
+  return {hy, cy};
+}
+
+int run_bench() {
+
+  constexpr unsigned int cpu = 0, gpu = 0;
+
+  cpu_pin(cpu);
+  check_cpu_governor(cpu);
+  check_gpu_applications_clock(gpu);
+
+  constexpr int batch_size = 1;
+  constexpr int input_size = 256;
+  constexpr int hidden_size = 512;
+
+  constexpr int fast = 0;
+
+  constexpr int seq_len = fast ? 3 : 512;
+  constexpr int warmup = fast ? 2 : 10;
+  constexpr int loops  = fast ? 3 : 20;
+
+  auto input = at::CUDA(at::kFloat).randn({seq_len, batch_size, input_size});
+  auto hx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto cx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto w_ih  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, input_size}));
+  auto w_hh  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, hidden_size}));
+
+
+  // Possible experiment:
+  // Create a stream that is default nonblocking
+  // (don't use the default stream because shenanigans)
+
+  cudaEvent_t start, end;
+  CUDA_CHECK(cudaEventCreate(&start));
+  CUDA_CHECK(cudaEventCreate(&end));
+
+  for (int i = 0; i < warmup + loops; i++) {
+    CUDA_CHECK(cudaEventRecord(start, 0));
+    auto start_cpu_ns = getTime();
+    for (int j = 0; j < seq_len; j++) {
+      std::tie(hx, cx) = lstm(input[j], hx, cx, w_ih, w_hh);
+    }
+    /*
+    for (int j = 0; j < 300000; j++) {
+      __asm__("");
+    }
+    */
+    auto end_cpu_ns = getTime();
+    CUDA_CHECK(cudaEventRecord(end, 0));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    float gpu_msecs;
+    cudaEventElapsedTime(&gpu_msecs, start, end);
+    print_result_usecs("lstm", i, gpu_msecs * 1000, (end_cpu_ns-start_cpu_ns)/1000.0, seq_len);
+  }
+
+  CUDA_CHECK(cudaEventDestroy(start));
+  CUDA_CHECK(cudaEventDestroy(end));
+
+  return 0;
+}
+
+namespace torch { namespace jit {
+
+// The interpreter run Graphs with Tensor inputs and Tensor outputs
+// a separate component in the autograd handles unwrapping and wrapping
+// variable objects for use in the interpreter.
+
+
+// We need some lists for inputs and outputs. To keep all the memory
+// contiguous we allocate a single vector and use offsets into the vector
+// which are stored in the RegList struct
+// start is an offset into int_data of Function if this list is integers
+// and bool_data of Function if this list is booleans (only free_flags)
+struct RegList {
+  int start;
+  int size;
+};
+
+struct UseList {
+  // values to be used
+  RegList values;
+  // boolean flags indicating whether to free the Tensor after this use
+  RegList free_flags;
+};
+
+using Callback = std::function<void(const std::vector<at::Tensor> &, std::vector<at::Tensor>&)>;
+// one instruction plus meta-data
+struct Instruction {
+  Callback callback;
+  UseList inputs;
+  RegList outputs;
+};
+
+struct Stage {
+  RegList inputs; // inputs to define for the stage
+  UseList outputs; // values consumed by the return
+  std::vector<Instruction> instructions;
+};
+
+// pre-processing that happens once per graph
+struct Function {
+  Function(std::shared_ptr<Graph> & graph)
+  : graph(graph) {
+    int cur_stage = -1;
+    int input_pos = 0;
+    int output_pos = 0;
+    // step 1: encode all operators and stages into registers and fill in
+    // input/output lists
+    for(auto node : graph->nodes()) {
+      if(node->kind() == kSelect)
+        continue;
+      insertStagesTo(cur_stage, node->stage(), input_pos, output_pos);
+      cur_stage = node->stage();
+      stages.back().instructions.emplace_back();
+      auto & inst = stages.back().instructions.back();
+      intListBegin(inst.inputs.values);
+      for(auto input : node->inputs()) {
+        intListInsert(inst.inputs.values, getOrAllocateRegister(input, true));
+      }
+      intListBegin(inst.outputs);
+      for(auto output : node->outputs()) {
+        intListInsert(inst.outputs, getOrAllocateRegister(output));
+      }
+      //TODO: fill in callback here
+    }
+    insertStagesTo(cur_stage, graph->stage(), input_pos, output_pos);
+
+    // step 2: the last time we use a register  we want to mark its free_flag
+    // so we clean it up
+    // this is done with a backward scan where we mark the first time we see it
+    std::unordered_set<int> seen_registers;
+    auto scanUses = [&](UseList & u) {
+      boolListBegin(u.free_flags);
+      for(size_t i = 0; i < u.values.size; i++) {
+        int reg = Int(u.values,i);
+        boolListInsert(u.free_flags, seen_registers.count(reg) == 0);
+        seen_registers.insert(reg);
+      }
+    };
+    for(auto sit = stages.rbegin(); sit != stages.rend(); sit++) {
+      scanUses(sit->outputs);
+      for(auto iit = sit->instructions.rbegin(); iit != sit->instructions.rend(); iit++) {
+        scanUses(iit->inputs);
+      }
+    }
+  }
+private:
+  void insertStagesTo(int cur_stage, int goal_stage, int & input_pos, int & output_pos) {
+    while(cur_stage < goal_stage) {
+      cur_stage++;
+      stages.emplace_back();
+      auto & stage = stages.back();
+      intListBegin(stage.inputs);
+      for(;input_pos < graph->inputs().size(); input_pos++) {
+        auto input = graph->inputs()[input_pos];
+        if(input->stage() > cur_stage)
+          break;
+        // unused inputs are given a false register -1 so that we never hold a
+        // reference to the tensor data, otherwise we would fail to clean them
+        // up since they do not have a last use at which to free them
+        int reg = input->uses().size() > 0 ? getOrAllocateRegister(input) : -1;
+        intListInsert(stage.inputs, reg);
+      }
+      intListBegin(stage.outputs.values);
+      for(;output_pos < graph->outputs().size(); output_pos++) {
+        auto output = graph->outputs()[output_pos];
+        if(output->stage() > cur_stage)
+          break;
+        intListInsert(stage.outputs.values, getOrAllocateRegister(output));
+      }
+    }
+  }
+  // helpers to build/access RegList objects
+  int Int(RegList & list, int i) {
+    return int_data[list.start + i];
+  }
+  void intListBegin(RegList & list) {
+    list.start = int_data.size();
+    list.size = 0;
+  }
+  void intListInsert(RegList & list, int value) {
+    int_data.push_back(value);
+    list.size++;
+  }
+  void boolListBegin(RegList & list) {
+    list.start = bool_data.size();
+    list.size = 0;
+  }
+  void boolListInsert(RegList & list, int value) {
+    bool_data.push_back(value);
+    list.size++;
+  }
+
+  int getOrAllocateRegister(Node * n, bool required = false) {
+    size_t u = n->unique();
+    if(unique_to_reg.count(u) > 0)
+      return unique_to_reg[u];
+    JIT_ASSERT(!required);
+    int r = register_size++;
+    unique_to_reg[u] = r;
+    return r;
+  }
+  std::shared_ptr<Graph> graph;
+  std::unordered_map<size_t, int> unique_to_reg; // map from unique of nodes to register in register table
+
+  friend struct Interpreter;
+  std::vector<Stage> stages;
+  int register_size = 0;
+
+  // all memory ArrayRef<int> are slices of this, to make sure
+  // the interpreter is mostly linearly scanning through memory
+  std::vector<int> int_data;
+  std::vector<bool> bool_data;
+};
+
+// Interpreter state that is held across stages and used to compute a Function
+struct Interpreter {
+  Interpreter(const std::shared_ptr<Function> & function)
+  : function(function),
+    int_data(function->int_data.data()),
+    bool_data(function->bool_data),
+    registers(function->register_size) {
+
+  }
+  void runOneStage(
+    const std::vector<at::Tensor> & inputs,
+    std::vector<at::Tensor> & outputs) {
+      JIT_ASSERT(current_stage < function->stages.size());
+      auto & stage = function->stages[current_stage++];
+      JIT_ASSERT(inputs.size() == stage.inputs.size);
+      for(size_t i = 0; i < stage.inputs.size; i++) {
+        int reg = Int(stage.inputs,i);
+        if(reg > 0) { // otherwise this input is dead, and we do not store it to avoid holding the reference
+          registers[reg] = inputs[i];
+        }
+      }
+      for(auto & inst : stage.instructions) {
+        loadTensorsFromRegisters(inst.inputs, input_buffer);
+        inst.callback(input_buffer, output_buffer);
+        for(size_t i = 0; i < inst.outputs.size; i++) {
+          registers[Int(inst.outputs,i)] = std::move(output_buffer[i]);
+        }
+        output_buffer.clear();
+        input_buffer.clear();
+      }
+      outputs.clear();
+      loadTensorsFromRegisters(stage.outputs, outputs);
+  }
+private:
+  int Int(const RegList & list, int i) {
+    return int_data[list.start + i];
+  };
+  bool Bool(const RegList & list, int i) {
+    return bool_data[list.start + i];
+  }
+  void loadTensorsFromRegisters(const UseList & uses, std::vector<at::Tensor> & outputs) {
+    for(size_t i = 0; i < uses.values.size; i++) {
+      auto & value = registers[Int(uses.values,i)];
+      if(Bool(uses.free_flags,i)) {
+        outputs.push_back(std::move(value));
+      } else {
+        outputs.push_back(value);
+      }
+    }
+  }
+  size_t current_stage = 0;
+  std::shared_ptr<Function> function;
+  // these are just copies of function to prevent indirections in intepreter
+  int * int_data;
+  const std::vector<bool> & bool_data;
+
+
+  // this holds all the tensors for this interpreter run
+  // we don't both minimizing the size of this vector, since the extra
+  // memory used by the pointers in this will be small
+  // instead we are very aggresive about releasing tensors when they become dead
+  // to make sure memory management happens efficiently.
+  std::vector<at::Tensor> registers;
+
+  // single buffer for input calls to ATen functions, so that we do not reallocate
+  std::vector<at::Tensor> input_buffer;
+  // also to prevent allocations
+  std::vector<at::Tensor> output_buffer;
+};
+
+}}
+
+
 namespace torch { namespace jit {
 
 template<typename T>
@@ -246,6 +568,9 @@ void internedStringsTests () {
 
 
 void runJITCPPTests() {
+  run_bench();
+  printf("DONE\n");
+  exit(0);
   codeTemplateTest();
   fusionTests();
   attributesTest();
