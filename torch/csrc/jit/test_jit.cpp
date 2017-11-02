@@ -10,100 +10,9 @@
 #include "torch/csrc/jit/interned_strings.h"
 #include <vector>
 
-
-
+#include "torch/csrc/jit/generated/aten_dispatch.h"
 #include "torch/csrc/jit/benchmark_common.h"
 
-
-at::Tensor t_use(at::Tensor x) {
-  return x;
-}
-at::Tensor t_def(at::Tensor x) {
-  return x.t();
-}
-
-std::pair<at::Tensor, at::Tensor>
-lstm(at::Tensor input,
-      at::Tensor hx,
-      at::Tensor cx,
-      at::Tensor w_ih,
-      at::Tensor w_hh) {
-  auto gates = input.mm(t_use(w_ih)) + hx.mm(t_use(w_hh));
-
-  auto chunked_gates = gates.chunk(4, 1);
-  auto ingate     = chunked_gates[0];
-  auto forgetgate = chunked_gates[1];
-  auto cellgate = chunked_gates[2];
-  auto outgate    = chunked_gates[3];
-
-  ingate = ingate.sigmoid();
-  outgate = outgate.sigmoid();
-  cellgate = cellgate.tanh();
-  forgetgate = forgetgate.sigmoid();
-
-  auto cy = (forgetgate * cx) + (ingate * cellgate);
-  auto hy = outgate * cy.tanh();
-
-  return {hy, cy};
-}
-
-int run_bench() {
-
-  constexpr unsigned int cpu = 0, gpu = 0;
-
-  cpu_pin(cpu);
-  check_cpu_governor(cpu);
-  check_gpu_applications_clock(gpu);
-
-  constexpr int batch_size = 1;
-  constexpr int input_size = 256;
-  constexpr int hidden_size = 512;
-
-  constexpr int fast = 0;
-
-  constexpr int seq_len = fast ? 3 : 512;
-  constexpr int warmup = fast ? 2 : 10;
-  constexpr int loops  = fast ? 3 : 20;
-
-  auto input = at::CUDA(at::kFloat).randn({seq_len, batch_size, input_size});
-  auto hx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
-  auto cx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
-  auto w_ih  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, input_size}));
-  auto w_hh  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, hidden_size}));
-
-
-  // Possible experiment:
-  // Create a stream that is default nonblocking
-  // (don't use the default stream because shenanigans)
-
-  cudaEvent_t start, end;
-  CUDA_CHECK(cudaEventCreate(&start));
-  CUDA_CHECK(cudaEventCreate(&end));
-
-  for (int i = 0; i < warmup + loops; i++) {
-    CUDA_CHECK(cudaEventRecord(start, 0));
-    auto start_cpu_ns = getTime();
-    for (int j = 0; j < seq_len; j++) {
-      std::tie(hx, cx) = lstm(input[j], hx, cx, w_ih, w_hh);
-    }
-    /*
-    for (int j = 0; j < 300000; j++) {
-      __asm__("");
-    }
-    */
-    auto end_cpu_ns = getTime();
-    CUDA_CHECK(cudaEventRecord(end, 0));
-    CUDA_CHECK(cudaDeviceSynchronize());
-    float gpu_msecs;
-    cudaEventElapsedTime(&gpu_msecs, start, end);
-    print_result_usecs("lstm", i, gpu_msecs * 1000, (end_cpu_ns-start_cpu_ns)/1000.0, seq_len);
-  }
-
-  CUDA_CHECK(cudaEventDestroy(start));
-  CUDA_CHECK(cudaEventDestroy(end));
-
-  return 0;
-}
 
 namespace torch { namespace jit {
 
@@ -167,7 +76,7 @@ struct Function {
       for(auto output : node->outputs()) {
         intListInsert(inst.outputs, getOrAllocateRegister(output));
       }
-      //TODO: fill in callback here
+      inst.callback = std::move(getTensorOp(node).op);
     }
     insertStagesTo(cur_stage, graph->stage(), input_pos, output_pos);
 
@@ -271,20 +180,24 @@ struct Interpreter {
   void runOneStage(
     const std::vector<at::Tensor> & inputs,
     std::vector<at::Tensor> & outputs) {
+      //std::cout << "running stage: " << current_stage << "\n";
       JIT_ASSERT(current_stage < function->stages.size());
       auto & stage = function->stages[current_stage++];
       JIT_ASSERT(inputs.size() == stage.inputs.size);
       for(size_t i = 0; i < stage.inputs.size; i++) {
         int reg = Int(stage.inputs,i);
-        if(reg > 0) { // otherwise this input is dead, and we do not store it to avoid holding the reference
+        if(reg >= 0) { // otherwise this input is dead, and we do not store it to avoid holding the reference
           registers[reg] = inputs[i];
         }
+        //std::cout << "registers[" << reg << "] = inputs[" << i << "](" << inputs[i].defined() << ")\n";
       }
       for(auto & inst : stage.instructions) {
         loadTensorsFromRegisters(inst.inputs, input_buffer);
         inst.callback(input_buffer, output_buffer);
         for(size_t i = 0; i < inst.outputs.size; i++) {
-          registers[Int(inst.outputs,i)] = std::move(output_buffer[i]);
+          int reg = Int(inst.outputs,i);
+          registers[reg] = std::move(output_buffer[i]);
+          //std::cout << "registers[" << reg << "] = outputs[" << i << "](" << output_buffer[i].defined() << ")\n";
         }
         output_buffer.clear();
         input_buffer.clear();
@@ -301,12 +214,16 @@ private:
   }
   void loadTensorsFromRegisters(const UseList & uses, std::vector<at::Tensor> & outputs) {
     for(size_t i = 0; i < uses.values.size; i++) {
-      auto & value = registers[Int(uses.values,i)];
+      int reg = Int(uses.values,i);
+      auto & value = registers[reg];
+      //std::cout << "inputs[" << i << "] = registers[" << reg << "] (" << value.defined() << ")";
       if(Bool(uses.free_flags,i)) {
+        //std::cout << " and FREED";
         outputs.push_back(std::move(value));
       } else {
         outputs.push_back(value);
       }
+      //std::cout << "\n";
     }
   }
   size_t current_stage = 0;
@@ -328,6 +245,194 @@ private:
   // also to prevent allocations
   std::vector<at::Tensor> output_buffer;
 };
+
+at::Tensor t_use(at::Tensor x) {
+  return x;
+}
+at::Tensor t_def(at::Tensor x) {
+  return x.t();
+}
+
+// given the difference of output vs expected tensor, check whether the
+// difference is within a relative tolerance range. This is a standard way of
+// matching tensor values upto certain precision
+bool checkRtol(const at::Tensor& diff, const std::vector<at::Tensor> inputs) {
+  double maxValue = 0.0;
+  for (auto& tensor : inputs) {
+    maxValue = fmax(tensor.abs().max().toCFloat(), maxValue);
+  }
+  return diff.abs().max().toCFloat() < 2e-6 * maxValue;
+}
+bool almostEqual(const at::Tensor & a, const at::Tensor & b) {
+  return checkRtol(a - b,{a, b});
+}
+
+std::pair<at::Tensor, at::Tensor>
+lstm(at::Tensor input,
+      at::Tensor hx,
+      at::Tensor cx,
+      at::Tensor w_ih,
+      at::Tensor w_hh) {
+  auto gates = input.mm(t_use(w_ih)) + hx.mm(t_use(w_hh));
+
+  auto chunked_gates = gates.chunk(4, 1);
+  auto ingate     = chunked_gates[0];
+  auto forgetgate = chunked_gates[1];
+  auto cellgate = chunked_gates[2];
+  auto outgate    = chunked_gates[3];
+
+  ingate = ingate.sigmoid();
+  outgate = outgate.sigmoid();
+  cellgate = cellgate.tanh();
+  forgetgate = forgetgate.sigmoid();
+
+  auto cy = (forgetgate * cx) + (ingate * cellgate);
+  auto hy = outgate * cy.tanh();
+
+  return {hy, cy};
+}
+
+Symbol sym(const char * str) {
+  return stringToSymbol(str);
+}
+
+Node * node(Graph& graph, const char * n, ArrayRef<Node*> inputs) {
+  return graph.appendNode(graph.create(sym(n),inputs));
+}
+
+Node * add(Graph & g, Node * a, Node * b) {
+  auto r = node(g, "add", {a,b});
+  r->t_(sym("alpha"), at::Scalar(1).toTensor());
+  return r;
+}
+
+std::shared_ptr<Graph> build_lstm() {
+  auto r = std::make_shared<Graph>();
+  auto & g = *r;
+  Node * input = g.addInput();
+  Node * hx = g.addInput();
+  Node * cx = g.addInput();
+  Node * w_ih = g.addInput();
+  Node * w_hh = g.addInput();
+
+
+  auto gates = add(g, node(g,"mm",{ input, w_ih }), node(g, "mm", {hx, w_hh}));
+  auto chunked_gates = node(g, "chunk", { gates });
+  chunked_gates->i_(sym("chunks"), 4);
+  chunked_gates->i_(sym("dim"), 1);
+  auto ingate = g.appendNode(g.createSelect(chunked_gates, 0));
+  auto forgetgate = g.appendNode(g.createSelect(chunked_gates, 1));
+  auto cellgate = g.appendNode(g.createSelect(chunked_gates, 2));
+  auto outgate = g.appendNode(g.createSelect(chunked_gates, 3));
+  ingate = node(g,"sigmoid",{ingate});
+  outgate = node(g,"sigmoid",{outgate});
+  cellgate = node(g,"tanh",{cellgate});
+  forgetgate = node(g,"sigmoid",{forgetgate});
+
+  auto cy = add(g, node(g,"mul", {forgetgate, cx}) , node(g, "mul", {ingate, cellgate}));
+  auto hy = node(g, "mul", {outgate, node(g, "tanh", {cy})});
+
+  g.registerOutput(hy);
+  g.registerOutput(cy);
+  g.lint();
+
+  return r;
+}
+
+
+int run_bench(int input_size) {
+
+  constexpr unsigned int cpu = 0, gpu = 0;
+
+  cpu_pin(cpu);
+  check_cpu_governor(cpu);
+  check_gpu_applications_clock(gpu);
+
+  constexpr int batch_size = 1;
+  //constexpr int input_size = ;
+  int hidden_size = 2*input_size;
+
+  constexpr int fast = 0;
+
+  constexpr int seq_len = fast ? 3 : 512;
+  constexpr int warmup = fast ? 2 : 10;
+  constexpr int loops  = fast ? 3 : 20;
+
+  auto input = at::CUDA(at::kFloat).randn({seq_len, batch_size, input_size});
+  auto hx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto cx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto w_ih  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, input_size}));
+  auto w_hh  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, hidden_size}));
+
+
+  auto run_it = [&](const char * name, std::function<void(void)> body) {
+    // Possible experiment:
+    // Create a stream that is default nonblocking
+    // (don't use the default stream because shenanigans)
+
+    cudaEvent_t start, end;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&end));
+
+    for (int i = 0; i < warmup + loops; i++) {
+      CUDA_CHECK(cudaEventRecord(start, 0));
+      auto start_cpu_ns = getTime();
+      body();
+      /*
+      for (int j = 0; j < 300000; j++) {
+        __asm__("");
+      }
+      */
+      auto end_cpu_ns = getTime();
+      CUDA_CHECK(cudaEventRecord(end, 0));
+      CUDA_CHECK(cudaDeviceSynchronize());
+      float gpu_msecs;
+      cudaEventElapsedTime(&gpu_msecs, start, end);
+      if(i + 1 == warmup + loops) {
+        std::cout << name << " " << input_size << " " << gpu_msecs * 1000.0 / seq_len << " " << (end_cpu_ns-start_cpu_ns)/1000.0 / seq_len << "\n";
+        //print_result_usecs(name, i, gpu_msecs * 1000, (end_cpu_ns-start_cpu_ns)/1000.0, seq_len);
+      }
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(end));
+  };
+
+
+  auto lstm_g = build_lstm();
+  auto lstm_function = std::make_shared<Function>(lstm_g);
+  std::vector<at::Tensor> outputs;
+  Interpreter lstm_interp(lstm_function);
+  lstm_interp.runOneStage({input[0], hx, cx, w_ih, w_hh}, outputs);
+  std::tie(hx, cx) = lstm(input[0], hx, cx, w_ih, w_hh);
+
+  //std::cout << almostEqual(outputs[0],hx) << "\n";
+  JIT_ASSERT(almostEqual(outputs[0],hx));
+  JIT_ASSERT(almostEqual(outputs[1],cx));
+
+
+  run_it("lstm",[&]() {
+    for (int j = 0; j < seq_len; j++) {
+      std::tie(hx, cx) = lstm(input[j], hx, cx, w_ih, w_hh);
+    }
+  });
+
+  run_it("lstm_interp",[&]() {
+    outputs[0] = hx;
+    outputs[1] = cx;
+    for (int j = 0; j < seq_len; j++) {
+      Interpreter lstm_interp(lstm_function);
+      lstm_interp.runOneStage({input[j], outputs[0], outputs[1], w_ih, w_hh}, outputs);
+    }
+  });
+
+
+
+
+
+  return 0;
+}
+
 
 }}
 
@@ -569,7 +674,9 @@ void internedStringsTests () {
 
 
 void runJITCPPTests() {
-  run_bench();
+  for(auto i  : {1, 2, 4, 8, 16, 32, 64, 128, 256 }) {
+    run_bench(i);
+  }
   printf("DONE\n");
   exit(0);
   codeTemplateTest();

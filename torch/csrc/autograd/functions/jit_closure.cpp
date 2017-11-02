@@ -118,7 +118,8 @@ struct EmitNull : public Function {
 
 struct LambdaFunction : public Function {
   LambdaFunction(const jit::TensorOp& op)
-    : LambdaFunction(op.num_inputs, op.op) {
+    : LambdaFunction(op.num_inputs, nullptr) {
+    throw std::runtime_error("I BROKE THIS");
     this->name_ = op.name;
   }
 
