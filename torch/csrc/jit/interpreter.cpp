@@ -7,11 +7,6 @@
 
 namespace torch { namespace jit {
 
-struct NotImplementedException : public std::logic_error {
-  NotImplementedException()
-  : std::logic_error("Function not yet implemented.") {}
-};
-
 using InputList = const std::vector<at::Tensor> &;
 using OutputList = std::vector<at::Tensor>&;
 using Callback = std::function<void(InputList, OutputList)>;

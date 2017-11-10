@@ -9,6 +9,9 @@
 #include "torch/csrc/jit/passes/graph_fuser.h"
 #include "torch/csrc/jit/passes/inplace_check.h"
 #include "torch/csrc/jit/python_arg_flatten.h"
+#include "torch/csrc/jit/interpreter.h"
+#include "torch/csrc/autograd/functions/utils.h"
+#include "torch/csrc/autograd/functions/basic_ops.h"
 
 #include <algorithm>
 #include <functional>
@@ -54,7 +57,7 @@ struct CompiledFunction {
       , is_volatile_(is_volatile) {}
 
     bool ready() {
-      if (closure_) return true;
+      if (is_ready_) return true;
 
       // Remove expired traces
       traces_.erase(std::remove_if(traces_.begin(),
@@ -83,20 +86,37 @@ struct CompiledFunction {
         PeepholeOptimize(complete_trace->graph);
         FuseGraph(complete_trace->graph);
       }
-
-      closure_ = std::make_shared<AutogradClosureFactory>(complete_trace.get());
+      try {
+        function_ = jit::Function(complete_trace->graph);
+      } catch(const jit::NotImplementedException & ex) {
+        closure_ = std::make_shared<AutogradClosureFactory>(complete_trace.get());
+      }
+      is_ready_ = true;
       return true;
     }
 
     variable_list run(const variable_list& in_vars) {
-      JIT_ASSERT(closure_);
+      JIT_ASSERT(is_ready_);
       AutoNoGIL _gil_guard;
-      auto fn = closure_->construct();
-      return (*fn)(in_vars);
+      if(closure_) {
+        auto fn = closure_->construct();
+        return (*fn)(in_vars);
+      } else {
+        for(auto & i : in_vars) {
+          inputs_.push_back(i.data());
+        }
+        Interpreter interp(function_);
+        interp.runOneStage(inputs_, outputs_);
+        inputs_.clear();
+        auto r = autograd::wrap_outputs(in_vars, std::move(outputs_), [](FunctionFlags f) {
+          return  std::make_shared<torch::autograd::Error>("Interp is not differentiable", std::move(f));
+        });
+        return r;
+      }
     }
 
     PyObject* add_trace(PyObject *args, const variable_list& in_vars) {
-      JIT_ASSERT(!closure_);
+      JIT_ASSERT(!is_ready_);
       // Start tracing
       auto trace = tracer::enter(fmap<TraceInput>(in_vars), is_volatile_ ? 1 : (fn_.nderivs_ + 1));
 
@@ -120,9 +140,15 @@ struct CompiledFunction {
 
     CompiledFunction& fn_;
     std::string out_desc_;
+    bool is_ready_ = false;
     std::shared_ptr<AutogradClosureFactory> closure_;
+    jit::Function function_;
     std::vector<std::shared_ptr<TracingState>> traces_;
     bool is_volatile_;
+
+    // used in run, here to avoid allocation
+    std::vector<at::Tensor> inputs_;
+    std::vector<at::Tensor> outputs_;
   };
 
   TraceForKey& getTrace(ParsedArgs& args) {
