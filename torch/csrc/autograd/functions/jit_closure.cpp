@@ -286,10 +286,6 @@ struct FusionGroupFunction : public Function {
       data.push_back(input.data());
     AutoGPU guard(data.back());
     std::vector<at::Tensor> outputs;
-    outputs.reserve(function->outputDescriptors().size());
-    for(auto & od : function->outputDescriptors()) {
-      outputs.push_back(at::CUDA(od.scalar_type).tensor());
-    }
     function->launch(data, outputs);
     return wrap_outputs(inputs, std::move(outputs), [](FunctionFlags f) {
       return std::make_shared<torch::autograd::Error>("FusionGroupFunction is not differentiable", std::move(f));

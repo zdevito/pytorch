@@ -1,8 +1,52 @@
 #include "interpreter.h"
 #include "torch/csrc/jit/ir.h"
 #include "torch/csrc/jit/generated/aten_dispatch.h"
+#ifdef WITH_CUDA
+#include "torch/csrc/jit/fusion_compiler.h"
+#endif
 
 namespace torch { namespace jit {
+
+struct NotImplementedException : public std::logic_error {
+  NotImplementedException()
+  : std::logic_error("Function not yet implemented.") {}
+};
+
+using InputList = const std::vector<at::Tensor> &;
+using OutputList = std::vector<at::Tensor>&;
+using Callback = std::function<void(InputList, OutputList)>;
+// Returns a function implementing functionality of a given node,
+// or nullptr if it's a no-op for autograd.
+Callback getCallback(Node *node) {
+  IR_IFM(node, PythonOp)
+    throw NotImplementedException();
+  IR_ELSEIFM(CppOp)
+    throw NotImplementedException();
+  IR_ELSEIF(Select)
+    barf("getCallback() on select?");
+  IR_ELSEIF(FusionGroup)
+#ifdef WITH_CUDA
+    auto fusion_fn = sharedFusionCompiler().getOrCompile(*value->g(kSubgraph));
+    return [fusion_fn](InputList inputs, OutputList outputs) {
+      fusion_fn->launch(inputs, outputs);
+    };
+#else
+    throw std::runtime_error("don't know how to execute FusionGroups without CUDA");
+#endif
+  IR_ELSEIF(Constant)
+    auto t = value->t(kvalue);
+    return [t](InputList inputs, OutputList outputs) {
+      outputs.push_back(t);
+    };
+  IR_ELSEIF(Undefined)
+    return [](InputList inputs, OutputList outputs) {
+      outputs.push_back(at::Tensor());
+    };
+  IR_ELSE()
+    return getTensorOp(node).op;
+  IR_END()
+}
+
 
 // We need some lists for inputs and outputs. To keep all the memory
 // contiguous we allocate a single vector and use offsets into the vector
@@ -21,7 +65,6 @@ struct UseList {
   RegList free_flags;
 };
 
-using Callback = std::function<void(const std::vector<at::Tensor> &, std::vector<at::Tensor>&)>;
 // one instruction plus meta-data
 struct Instruction {
   Callback callback;
@@ -59,7 +102,7 @@ struct FunctionImpl {
       for(auto output : node->outputs()) {
         intListInsert(inst.outputs, getOrAllocateRegister(output));
       }
-      inst.callback = std::move(getTensorOp(node).op);
+      inst.callback = getCallback(node);
     }
     insertStagesTo(cur_stage, graph->stage(), input_pos, output_pos);
 
