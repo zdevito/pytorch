@@ -39,7 +39,11 @@ struct Interpreter {
     const std::vector<at::Tensor> & inputs,
     std::vector<at::Tensor> & outputs);
   ~Interpreter();
+  // create a copy of Interpreter with its current state
+  // used when retain_graph=True so that stages can be re-run
+  Interpreter clone() const;
 private:
+  Interpreter(InterpreterImpl * pImpl);
   std::shared_ptr<InterpreterImpl> pImpl;
 };
 

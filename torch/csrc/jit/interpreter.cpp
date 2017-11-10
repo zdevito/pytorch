@@ -256,6 +256,11 @@ struct InterpreterImpl {
   // memory used by the pointers in this will be small
   // instead we are very aggresive about releasing tensors when they become dead
   // to make sure memory management happens efficiently.
+
+  // We optimize for the case where derivatives are run with retain_graph=False
+  // in the case where it is true, then the interpreter and this array get copied
+  // if this every becomes a bottleneck then we _should_ consider minimizing the
+  // total number or register
   std::vector<at::Tensor> registers;
 
   // single buffer for input calls to ATen functions, so that we do not reallocate
@@ -275,5 +280,9 @@ void Interpreter::runOneStage(
   std::vector<at::Tensor> & outputs) {
     return pImpl->runOneStage(inputs, outputs);
 }
+Interpreter Interpreter::clone() const {
+  return Interpreter(new InterpreterImpl(*pImpl));
+}
+Interpreter::Interpreter(InterpreterImpl * pImpl) : pImpl(pImpl) {}
 
 }}

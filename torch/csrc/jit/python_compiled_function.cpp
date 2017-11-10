@@ -10,8 +10,7 @@
 #include "torch/csrc/jit/passes/inplace_check.h"
 #include "torch/csrc/jit/python_arg_flatten.h"
 #include "torch/csrc/jit/interpreter.h"
-#include "torch/csrc/autograd/functions/utils.h"
-#include "torch/csrc/autograd/functions/basic_ops.h"
+#include "torch/csrc/jit/interpreter_autograd_function.h"
 
 #include <algorithm>
 #include <functional>
@@ -87,7 +86,8 @@ struct CompiledFunction {
         FuseGraph(complete_trace->graph);
       }
       try {
-        function_ = jit::Function(complete_trace->graph);
+        function_ = std::make_shared<InterpreterAutogradFunction>(
+            jit::Interpreter(jit::Function(complete_trace->graph)));
       } catch(const jit::NotImplementedException & ex) {
         closure_ = std::make_shared<AutogradClosureFactory>(complete_trace.get());
       }
@@ -102,16 +102,7 @@ struct CompiledFunction {
         auto fn = closure_->construct();
         return (*fn)(in_vars);
       } else {
-        for(auto & i : in_vars) {
-          inputs_.push_back(i.data());
-        }
-        Interpreter interp(function_);
-        interp.runOneStage(inputs_, outputs_);
-        inputs_.clear();
-        auto r = autograd::wrap_outputs(in_vars, std::move(outputs_), [](FunctionFlags f) {
-          return  std::make_shared<torch::autograd::Error>("Interp is not differentiable", std::move(f));
-        });
-        return r;
+        return function_->apply(in_vars);
       }
     }
 
@@ -142,13 +133,9 @@ struct CompiledFunction {
     std::string out_desc_;
     bool is_ready_ = false;
     std::shared_ptr<AutogradClosureFactory> closure_;
-    jit::Function function_;
+    std::shared_ptr<InterpreterAutogradFunction> function_;
     std::vector<std::shared_ptr<TracingState>> traces_;
     bool is_volatile_;
-
-    // used in run, here to avoid allocation
-    std::vector<at::Tensor> inputs_;
-    std::vector<at::Tensor> outputs_;
   };
 
   TraceForKey& getTrace(ParsedArgs& args) {
