@@ -311,6 +311,32 @@ Node * add(Graph & g, Node * a, Node * b) {
   return r;
 }
 
+std::tuple<Node*, Node*> build_lstm_body(
+  Graph & g,
+  Node * input,
+  Node * hx,
+  Node * cx,
+  Node * w_ih,
+  Node * w_hh) {
+    auto gates = add(g, node(g,"mm",{ input, w_ih }), node(g, "mm", {hx, w_hh}));
+    auto chunked_gates = node(g, "chunk", { gates });
+    chunked_gates->i_(sym("chunks"), 4);
+    chunked_gates->i_(sym("dim"), 1);
+    auto ingate = g.appendNode(g.createSelect(chunked_gates, 0));
+    auto forgetgate = g.appendNode(g.createSelect(chunked_gates, 1));
+    auto cellgate = g.appendNode(g.createSelect(chunked_gates, 2));
+    auto outgate = g.appendNode(g.createSelect(chunked_gates, 3));
+    ingate = node(g,"sigmoid",{ingate});
+    outgate = node(g,"sigmoid",{outgate});
+    cellgate = node(g,"tanh",{cellgate});
+    forgetgate = node(g,"sigmoid",{forgetgate});
+
+    auto cy = add(g, node(g,"mul", {forgetgate, cx}) , node(g, "mul", {ingate, cellgate}));
+    auto hy = node(g, "mul", {outgate, node(g, "tanh", {cy})});
+
+    return std::make_tuple(hy,cy);
+}
+
 std::shared_ptr<Graph> build_lstm() {
   auto r = std::make_shared<Graph>();
   auto & g = *r;
@@ -320,22 +346,38 @@ std::shared_ptr<Graph> build_lstm() {
   Node * w_ih = g.addInput();
   Node * w_hh = g.addInput();
 
+  Node * hy;
+  Node * cy;
+  std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
 
-  auto gates = add(g, node(g,"mm",{ input, w_ih }), node(g, "mm", {hx, w_hh}));
-  auto chunked_gates = node(g, "chunk", { gates });
-  chunked_gates->i_(sym("chunks"), 4);
-  chunked_gates->i_(sym("dim"), 1);
-  auto ingate = g.appendNode(g.createSelect(chunked_gates, 0));
-  auto forgetgate = g.appendNode(g.createSelect(chunked_gates, 1));
-  auto cellgate = g.appendNode(g.createSelect(chunked_gates, 2));
-  auto outgate = g.appendNode(g.createSelect(chunked_gates, 3));
-  ingate = node(g,"sigmoid",{ingate});
-  outgate = node(g,"sigmoid",{outgate});
-  cellgate = node(g,"tanh",{cellgate});
-  forgetgate = node(g,"sigmoid",{forgetgate});
+  g.registerOutput(hy);
+  g.registerOutput(cy);
+  g.lint();
 
-  auto cy = add(g, node(g,"mul", {forgetgate, cx}) , node(g, "mul", {ingate, cellgate}));
-  auto hy = node(g, "mul", {outgate, node(g, "tanh", {cy})});
+  return r;
+}
+
+std::shared_ptr<Graph> build_lstm_stages() {
+  auto r = std::make_shared<Graph>();
+  auto & g = *r;
+  Node * input = g.addInput();
+  Node * hx = g.addInput();
+  Node * cx = g.addInput();
+  Node * w_ih = g.addInput();
+  Node * w_hh = g.addInput();
+
+  Node * hy;
+  Node * cy;
+  std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
+
+  // use some stuff from the previous stage as well
+  // as a new input
+  g.advanceStage();
+  hx = hy;
+  g.registerOutput(cy);
+  cx = g.addInput();
+
+  std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
 
   g.registerOutput(hy);
   g.registerOutput(cy);
@@ -364,6 +406,39 @@ void interpTest() {
     Interpreter lstm_interp(lstm_function);
     lstm_interp.runOneStage({input[0], hx, cx, w_ih, w_hh}, outputs);
     std::tie(hx, cx) = lstm(input[0], hx, cx, w_ih, w_hh);
+
+    //std::cout << almostEqual(outputs[0],hx) << "\n";
+    JIT_ASSERT(almostEqual(outputs[0],hx));
+    JIT_ASSERT(almostEqual(outputs[1],cx));
+}
+
+void interpStageTest() {
+    constexpr int batch_size = 4;
+    constexpr int input_size = 256;
+    constexpr int seq_len = 32;
+
+    int hidden_size = 2*input_size;
+    auto input = at::CUDA(at::kFloat).randn({seq_len, batch_size, input_size});
+    auto hx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+    auto cx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+    auto cx1 = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+    auto w_ih  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, input_size}));
+    auto w_hh  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, hidden_size}));
+
+
+    auto lstm_g = build_lstm_stages();
+    Function  lstm_function(lstm_g);
+    std::vector<at::Tensor> outputs;
+    Interpreter lstm_interp(lstm_function);
+    lstm_interp.runOneStage({input[0], hx, cx, w_ih, w_hh}, outputs);
+    auto cy0 = outputs[0];
+    lstm_interp.runOneStage({cx1}, outputs);
+    at::Tensor ihx = outputs[0];
+    at::Tensor icx = outputs[1];
+
+
+    std::tie(hx, cx) = lstm(input[0], hx, cx, w_ih, w_hh);
+    std::tie(hx, cx) = lstm(input[0], hx, cx1, w_ih, w_hh);
 
     //std::cout << almostEqual(outputs[0],hx) << "\n";
     JIT_ASSERT(almostEqual(outputs[0],hx));
@@ -454,6 +529,7 @@ int run_bench(int input_size) {
 
 void runJITCPPTests() {
   interpTest();
+  interpStageTest();
   for(auto i  : {1, 2, 4, 8, 16, 32, 64, 128, 256 }) {
     run_bench(i);
   }
