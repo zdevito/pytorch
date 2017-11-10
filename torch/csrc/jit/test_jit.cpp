@@ -531,7 +531,7 @@ void runJITCPPTests() {
   interpTest();
   interpStageTest();
   for(auto i  : {1, 2, 4, 8, 16, 32, 64, 128, 256 }) {
-    run_bench(i);
+    //run_bench(i);
   }
   codeTemplateTest();
   fusionTests();

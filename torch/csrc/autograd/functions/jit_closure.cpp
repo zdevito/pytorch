@@ -119,7 +119,13 @@ struct EmitNull : public Function {
 struct LambdaFunction : public Function {
   LambdaFunction(const jit::TensorOp& op)
     : LambdaFunction(op.num_inputs, nullptr) {
-    throw std::runtime_error("I BROKE THIS");
+    auto real_op = op.op;
+    this->fn_ = [real_op](const variable_list& inputs) -> variable_list {
+      std::vector<at::Tensor> tinputs(inputs.begin(), inputs.end());
+      std::vector<at::Tensor> toutputs;
+      real_op(tinputs, toutputs);
+      return variable_list(toutputs.begin(), toutputs.end());
+    };
     this->name_ = op.name;
   }
 
