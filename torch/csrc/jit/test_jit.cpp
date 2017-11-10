@@ -9,7 +9,10 @@
 #include "torch/csrc/jit/attributes.h"
 #include "torch/csrc/jit/interned_strings.h"
 #include <vector>
+
 #include "torch/csrc/jit/interpreter.h"
+
+#include "torch/csrc/jit/benchmark_common.h"
 
 namespace torch { namespace jit {
 
@@ -442,9 +445,94 @@ void interpStageTest() {
     JIT_ASSERT(almostEqual(outputs[1],cx));
 }
 
+
+int run_bench(int input_size) {
+
+  constexpr unsigned int cpu = 0, gpu = 0;
+
+  cpu_pin(cpu);
+  check_cpu_governor(cpu);
+  check_gpu_applications_clock(gpu);
+
+  constexpr int batch_size = 1;
+  //constexpr int input_size = ;
+  int hidden_size = 2*input_size;
+
+  constexpr int fast = 0;
+
+  constexpr int seq_len = fast ? 3 : 512;
+  constexpr int warmup = fast ? 2 : 10;
+  constexpr int loops  = fast ? 3 : 20;
+
+  auto input = at::CUDA(at::kFloat).randn({seq_len, batch_size, input_size});
+  auto hx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto cx    = at::CUDA(at::kFloat).randn({batch_size, hidden_size});
+  auto w_ih  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, input_size}));
+  auto w_hh  = t_def(at::CUDA(at::kFloat).randn({4 * hidden_size, hidden_size}));
+
+
+  auto run_it = [&](const char * name, std::function<void(void)> body) {
+    // Possible experiment:
+    // Create a stream that is default nonblocking
+    // (don't use the default stream because shenanigans)
+
+    cudaEvent_t start, end;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&end));
+
+    for (int i = 0; i < warmup + loops; i++) {
+      CUDA_CHECK(cudaEventRecord(start, 0));
+      auto start_cpu_ns = getTime();
+      body();
+      /*
+      for (int j = 0; j < 300000; j++) {
+        __asm__("");
+      }
+      */
+      auto end_cpu_ns = getTime();
+      CUDA_CHECK(cudaEventRecord(end, 0));
+      CUDA_CHECK(cudaDeviceSynchronize());
+      float gpu_msecs;
+      cudaEventElapsedTime(&gpu_msecs, start, end);
+      if(i + 1 == warmup + loops) {
+        std::cout << name << " " << input_size << " " << gpu_msecs * 1000.0 / seq_len << " " << (end_cpu_ns-start_cpu_ns)/1000.0 / seq_len << "\n";
+        //print_result_usecs(name, i, gpu_msecs * 1000, (end_cpu_ns-start_cpu_ns)/1000.0, seq_len);
+      }
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(end));
+  };
+
+
+  auto lstm_g = build_lstm();
+  Function  lstm_function(lstm_g);
+  std::vector<at::Tensor> outputs(2);
+
+  run_it("lstm",[&]() {
+    for (int j = 0; j < seq_len; j++) {
+      std::tie(hx, cx) = lstm(input[j], hx, cx, w_ih, w_hh);
+    }
+  });
+
+  run_it("lstm_interp",[&]() {
+    outputs[0] = hx;
+    outputs[1] = cx;
+    for (int j = 0; j < seq_len; j++) {
+      Interpreter lstm_interp(lstm_function);
+      lstm_interp.runOneStage({input[j], outputs[0], outputs[1], w_ih, w_hh}, outputs);
+    }
+  });
+
+  return 0;
+}
+
 void runJITCPPTests() {
   interpTest();
   interpStageTest();
+  for(auto i  : {1, 2, 4, 8, 16, 32, 64, 128, 256 }) {
+    //run_bench(i);
+  }
   codeTemplateTest();
   fusionTests();
   attributesTest();
