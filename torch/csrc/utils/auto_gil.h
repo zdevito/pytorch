@@ -1,5 +1,5 @@
 #pragma once
-
+#include "torch/csrc/autograd/profiler.h"
 // RAII structs to acquire and release Python's global interpreter lock (GIL)
 
 #include <Python.h>
@@ -17,11 +17,13 @@ struct AutoGIL {
 
 // Releases the GIL on construction
 struct AutoNoGIL {
-  AutoNoGIL() : save(PyEval_SaveThread()) {
+  AutoNoGIL()
+  : save(PyEval_SaveThread())
+  , func("AutoNoGIL", false) {
   }
   ~AutoNoGIL() {
     PyEval_RestoreThread(save);
   }
-
   PyThreadState* save;
+  torch::autograd::profiler::RecordFunction func;
 };

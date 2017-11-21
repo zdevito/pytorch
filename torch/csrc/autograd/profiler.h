@@ -192,7 +192,7 @@ inline void mark(std::string name, bool include_cuda = true) {
   }
 }
 
-inline void pushRange(std::string name) {
+inline void pushRange(std::string name, bool include_cuda = true) {
   if (state == ProfilerState::NVTX) {
 #ifdef WITH_CUDA
     nvtxRangePushA(name.c_str());
@@ -200,11 +200,11 @@ inline void pushRange(std::string name) {
     throw std::logic_error("pushRange called with NVTX tracing, but compiled without CUDA");
 #endif
   } else {
-    getEventList().record(EventKind::PushRange, std::move(name), thread_id, state == ProfilerState::CUDA);
+    getEventList().record(EventKind::PushRange, std::move(name), thread_id, include_cuda && state == ProfilerState::CUDA);
   }
 }
 
-inline void popRange() {
+inline void popRange(bool include_cuda = true) {
   if (state == ProfilerState::NVTX) {
 #ifdef WITH_CUDA
     nvtxRangePop();
@@ -212,24 +212,27 @@ inline void popRange() {
     throw std::logic_error("popRange called with NVTX tracing, but compiled without CUDA");
 #endif
   } else {
-    getEventList().record(EventKind::PopRange, std::string(), thread_id, state == ProfilerState::CUDA);
+    getEventList().record(EventKind::PopRange, std::string(), thread_id, include_cuda && state == ProfilerState::CUDA);
   }
 }
 
 struct RecordFunction {
-  explicit RecordFunction(Function *fn) {
+  explicit RecordFunction(Function *fn, bool include_cuda = true)
+  : include_cuda(include_cuda) {
     if (state == ProfilerState::Disabled) return;
     pushFunctionRange(fn);
   }
 
-  explicit RecordFunction(std::string name) {
+  explicit RecordFunction(std::string name, bool include_cuda = true)
+  : include_cuda(include_cuda) {
     if (state == ProfilerState::Disabled) return;
-    pushRange(std::move(name));
+    pushRange(std::move(name), include_cuda);
   }
 
-  explicit RecordFunction(const char *name) {
+  explicit RecordFunction(const char *name, bool include_cuda = true)
+  : include_cuda(include_cuda) {
     if (state == ProfilerState::Disabled) return;
-    pushRange(name);
+    pushRange(name, include_cuda);
   }
 
   ~RecordFunction() {
@@ -239,6 +242,8 @@ struct RecordFunction {
 
   // Needed only because we don't have Function defined yet.
   void pushFunctionRange(Function *fn);
+private:
+  bool include_cuda;
 };
 
 using thread_event_lists = std::vector<std::vector<Event>>;
