@@ -13,6 +13,45 @@
 
 namespace torch { namespace jit {
 
+  // help build Graphs for tests
+  class Var {
+    Var(Value * v) : v(v) {}
+    static Var Input(Graph & g, std::string name = "") {
+      return g.addInput(name);
+    }
+    static void Output(Graph & g, Var s) {
+      g.registerOutput(s.v);
+    }
+    Var sigmoid(Var a) {
+      return appendNewNode(ksigmoid, {a})[0];
+    }
+    Value * value() const {
+      return v;
+    }
+  private:
+    std::vector<Var> appendNewNode(Symbol kind, ArrayRef<Var> inputs,
+                                   int num_outputs = 1,
+                                   std::function<void(Node*)> annotate = nullptr,
+                                   Graph * g = nullptr) {
+        if(g == nullptr) {
+          g = inputs.at(0).value()->owningGraph();
+        }
+        Node * n = g->create(kind, num_outputs);
+        for(auto i : inputs) {
+          n->addInput(i.value());
+        }
+        if(annotate) {
+          annotate(n);
+        }
+        std::vector<Var> out;
+        for(auto v : n->outputs()) {
+          out.emplace_back(v);
+        }
+        return out;
+    }
+    Value * v;
+  };
+
 template<typename T>
 static std::ostream & operator<<(std::ostream & out, const std::vector<T> & list) {
   size_t i = 0;
@@ -92,7 +131,9 @@ static void fusionTests() {
     Graph graph;
     Value * i0 = graph.addInput();
     Value * i1 = graph.addInput();
-    auto o0 = appendNewNode(kmul,graph,{i0, i1});
+
+    Value * i2 = graph.addInput();
+    auto o0 = appendNewNode(kmul,graph,{i0, i1, i2});
     graph.registerOutput(o0);
     auto a = at::CUDA(at::kFloat).rand({3,4});
     auto b = at::CUDA(at::kFloat).rand({4,3}).transpose(0,1);

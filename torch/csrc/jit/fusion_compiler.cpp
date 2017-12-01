@@ -558,10 +558,15 @@ protected:
 struct TempFile {
   TH_DISALLOW_COPY_AND_ASSIGN(TempFile);
   TempFile(const std::string & t, int suffix) {
+    // mkstemps edits its first argument in places
+    // so we make a copy of the string here, including null terminator
     std::vector<char> tt(t.c_str(), t.c_str() + t.size() + 1);
     int fd = mkstemps(tt.data(), suffix);
     JIT_ASSERT(fd != -1);
     file_ = fdopen(fd, "r+");
+
+    // - 1 becuase tt.size() includes the null terminator,
+    // but std::string does not expect one
     name_ = std::string(tt.begin(), tt.end() - 1);
   }
   const std::string & name() const {
