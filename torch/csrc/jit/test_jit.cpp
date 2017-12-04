@@ -128,6 +128,11 @@ static void codeTemplateTest() {
   }
 }
 
+Value * appendNewNode(NodeKind kind, Graph& graph, ArrayRef<Value*> inputs) {
+  return graph.appendNode(graph.create(kind,inputs))->output();
+}
+
+
 static void fusionTests() {
   FusionCompiler comp;
 
@@ -169,7 +174,7 @@ static void fusionTests() {
     auto o0 = p16 * p5;
     o0.addAsOutput();
     o1.addAsOutput();
-    
+
     graph.lint();
 
     std::vector<at::Tensor> inputs;
@@ -220,8 +225,8 @@ static void fusionTests() {
 
   auto testConcat = [&](int dim) {
     Graph graph;
-    Value * i0 = Var::Input(graph);
-    Value * i1 = Var::Input(graph);
+    Value * i0 = graph.addInput();
+    Value * i1 = graph.addInput();
     auto o0 = appendNewNode(kmul,graph,{i0, i1});
     graph.registerOutput(o0);
     graph.registerOutput(appendNewNode(kcat, graph, {i0,o0})->node()->i_(kdim, dim)->output());
