@@ -13,6 +13,7 @@ namespace torch { namespace jit {
 
 // help build Graphs for tests
 struct Var {
+  Var() : v(nullptr) {}
   Var(Value * v) : v(v) {}
   static Var Input(Graph & g, std::string name = "") {
     return g.addInput(name);
@@ -20,6 +21,13 @@ struct Var {
   void addAsOutput() {
     v->owningGraph()->registerOutput(v);
   }
+  static Var cat(ArrayRef<Var> inputs, int32_t dim) {
+    Node* n;
+    auto r = create(kcat, inputs, 1, &n)[0];
+    n->i_(kdim, dim);
+    return r;
+  }
+
   static std::vector<Var> create(Symbol kind, ArrayRef<Var> inputs,
                                  int num_outputs = 1,
                                  Node** created_node = nullptr,
@@ -49,16 +57,30 @@ struct Var {
     n->t_(kalpha, at::Scalar(1).toTensor());
     return r;
   }
+
+  Var mm(Var rhs) {
+    return create(s("mm"), {*this, rhs})[0];
+  }
   Var sigmoid() {
     return create(ksigmoid, {*this})[0];
   }
   Var tanh() {
     return create(ktanh, {*this})[0];
   }
+  std::vector<Var> chunk(int32_t chunks, uint32_t dim) {
+    Node * n;
+    auto r = create(s("chunk"), { *this }, chunks, &n);
+    n->i_(s("chunks"), chunks)
+    ->i_(s("dim"), dim);
+    return r;
+  }
   Value * value() const {
     return v;
   }
 private:
+  static Symbol s(const char * s_) {
+    return stringToSymbol(s_);
+  }
   Value * v;
 };
 
@@ -225,11 +247,12 @@ static void fusionTests() {
 
   auto testConcat = [&](int dim) {
     Graph graph;
-    Value * i0 = graph.addInput();
-    Value * i1 = graph.addInput();
-    auto o0 = appendNewNode(kmul,graph,{i0, i1});
-    graph.registerOutput(o0);
-    graph.registerOutput(appendNewNode(kcat, graph, {i0,o0})->node()->i_(kdim, dim)->output());
+    Var i0 = Var::Input(graph);
+    Var i1 = Var::Input(graph);
+    auto o0 = i0 * i1;
+    o0.addAsOutput();
+    Var::cat({i0, o0}, dim).addAsOutput();
+
     auto a = at::CUDA(at::kFloat).rand({3,4,5});
     auto b = at::CUDA(at::kFloat).rand({4,3,5}).transpose(0,1);
     auto o = at::CUDA(at::kFloat).zeros({3,4,5});
@@ -355,29 +378,26 @@ Value * add(Graph & g, Value * a, Value * b) {
   return r;
 }
 
-std::tuple<Value*, Value*> build_lstm_body(
+std::tuple<Var, Var> build_lstm_body(
   Graph & g,
-  Value * input,
-  Value * hx,
-  Value * cx,
-  Value * w_ih,
-  Value * w_hh) {
-    auto gates = add(g, node(g,"mm",{ input, w_ih }), node(g, "mm", {hx, w_hh}));
-    auto chunked_gates = g.appendNode(g.create(sym("chunk"),{ gates }, 4))
-      ->i_(sym("chunks"), 4)
-      ->i_(sym("dim"), 1);
-    auto outputs = chunked_gates->outputs();
+  Var input,
+  Var hx,
+  Var cx,
+  Var w_ih,
+  Var w_hh) {
+    auto gates =  input.mm(w_ih) + hx.mm(w_hh);
+    auto outputs = gates.chunk(4, 1);
     auto ingate = outputs[0];
     auto forgetgate = outputs[1];
     auto cellgate = outputs[2];
     auto outgate = outputs[3];
-    ingate = node(g,"sigmoid",{ingate});
-    outgate = node(g,"sigmoid",{outgate});
-    cellgate = node(g,"tanh",{cellgate});
-    forgetgate = node(g,"sigmoid",{forgetgate});
+    ingate = ingate.sigmoid();
+    outgate = outgate.sigmoid();
+    cellgate = cellgate.tanh();
+    forgetgate = forgetgate.sigmoid();
 
-    auto cy = add(g, node(g,"mul", {forgetgate, cx}) , node(g, "mul", {ingate, cellgate}));
-    auto hy = node(g, "mul", {outgate, node(g, "tanh", {cy})});
+    auto cy = forgetgate*cx + ingate*cellgate;
+    auto hy = outgate*cy.tanh();
 
     return std::make_tuple(hy,cy);
 }
@@ -391,12 +411,12 @@ std::shared_ptr<Graph> build_lstm() {
   Value * w_ih = g.addInput();
   Value * w_hh = g.addInput();
 
-  Value * hy;
-  Value * cy;
+  Var hy;
+  Var cy;
   std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
 
-  g.registerOutput(hy);
-  g.registerOutput(cy);
+  hy.addAsOutput();
+  cy.addAsOutput();
   g.lint();
 
   return r;
@@ -405,27 +425,27 @@ std::shared_ptr<Graph> build_lstm() {
 std::shared_ptr<Graph> build_lstm_stages() {
   auto r = std::make_shared<Graph>();
   auto & g = *r;
-  Value * input = g.addInput();
-  Value * hx = g.addInput();
-  Value * cx = g.addInput();
-  Value * w_ih = g.addInput();
-  Value * w_hh = g.addInput();
+  Var input = g.addInput();
+  Var hx = g.addInput();
+  Var cx = g.addInput();
+  Var w_ih = g.addInput();
+  Var w_hh = g.addInput();
 
-  Value * hy;
-  Value * cy;
+  Var hy;
+  Var cy;
   std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
 
   // use some stuff from the previous stage as well
   // as a new input
   g.advanceStage();
   hx = hy;
-  g.registerOutput(cy);
+  cy.addAsOutput();
   cx = g.addInput();
 
   std::tie(hy,cy) = build_lstm_body(g, input, hx, cx, w_ih, w_hh);
 
-  g.registerOutput(hy);
-  g.registerOutput(cy);
+  hy.addAsOutput();
+  cy.addAsOutput();
   g.lint();
 
   return r;
