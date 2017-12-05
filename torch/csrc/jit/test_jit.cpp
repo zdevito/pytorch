@@ -8,7 +8,7 @@
 #include "torch/csrc/jit/interned_strings.h"
 #include <vector>
 #include "torch/csrc/jit/interpreter.h"
-#include "torch/csrc/jit/passes/graph_fuser.h"
+
 namespace torch { namespace jit {
 
 // help build Graphs for tests
@@ -463,125 +463,6 @@ void interpTest() {
     JIT_ASSERT(exactlyEqual(outputs[1],cx));
 }
 
-inline uint64_t getTime() {
-  using namespace std::chrono;
-  using clock = std::conditional<high_resolution_clock::is_steady, high_resolution_clock, steady_clock>::type;
-  return duration_cast<nanoseconds>(clock::now().time_since_epoch()).count();
-}
-
-void printTime(const std::string & msg, int times, std::function<void(void)> fn) {
-  std::cout << "before " << msg << "\n";
-  auto start = getTime();
-  fn();
-  auto end = getTime();
-  std::cout << msg << ": " << (end - start)/(1000.f*times) << "us\n";
-}
-
-void cpuJITTiming() {
-    constexpr int batch_size = 1;
-    int hidden_size = 100000;
-
-    auto & Float = at::CPU(at::kFloat);
-
-    auto hx    = Float.zeros({batch_size, hidden_size});
-    auto cx    = Float.zeros({batch_size, hidden_size});
-    auto dd    = Float.zeros({batch_size, hidden_size});
-
-    auto o    = Float.zeros({batch_size, hidden_size});
-
-
-    Graph g;
-    Var a = Var::Input(g);
-    Var b = Var::Input(g);
-
-    Var c = a + b;
-    c.addAsOutput();
-    g.lint();
-    FusionCompiler comp;
-    auto fn = comp.getOrCompile(g, false, {hx,cx},{o});
-
-    int N = 100;
-    printTime("fused", N, [&]{
-      for(int i = 0; i < N; i++ ) {
-        std::vector<at::Tensor> oo;
-        fn->launch({hx,cx}, oo);
-      }
-    });
-    printTime("orig", N, [&]{
-      for(int i = 0; i < N; i++ ) {
-        o = hx + cx;
-      }
-    });
-
-    printTime("fused", N, [&]{
-      for(int i = 0; i < N; i++ ) {
-        std::vector<at::Tensor> oo;
-        fn->launch({hx,cx}, oo);
-      }
-    });
-    printTime("orig", N, [&]{
-      for(int i = 0; i < N; i++ ) {
-        o = hx + cx;
-      }
-    });
-}
-
-void cpuTimingLSTM() {
-  constexpr int batch_size = 4;
-  constexpr int input_size = 256;
-  constexpr int seq_len = 32;
-  auto & Float = at::CPU(at::kFloat);
-  int hidden_size = 2*input_size;
-
-  auto input = Float.randn({seq_len, batch_size, input_size});
-  auto hx    = Float.randn({batch_size, hidden_size});
-  auto cx    = Float.randn({batch_size, hidden_size});
-  auto w_ih  = t_def(Float.randn({4 * hidden_size, input_size})).contiguous();
-  auto w_hh  = t_def(Float.randn({4 * hidden_size, hidden_size})).contiguous();
-
-  auto lstm_g = build_lstm();
-  auto typ = std::make_shared<TensorType>(hx);
-  for(auto & i : lstm_g->inputs()) {
-    i->setType(typ);
-  }
-  for(auto n : lstm_g->nodes()) {
-    for(auto o : n->outputs()) {
-      o->setType(typ);
-    }
-  }
-  FuseGraph(lstm_g);
-  lstm_g->lint();
-  std::cout << *lstm_g << "\n";
-  Code  lstm_function(lstm_g);
-  std::vector<at::Tensor> outputs;
-
-  auto input0 = input[0].contiguous();
-
-  printTime("fused", 1, [&]{
-    InterpreterState lstm_interp(lstm_function);
-    lstm_interp.runOneStage({input0, hx, cx, w_ih, w_hh}, outputs);
-  });
-  printTime("unfused", 1, [&] {
-    std::tie(hx, cx) = lstm(input0, hx, cx, w_ih, w_hh);
-  });
-
-  printTime("fused", 1, [&]{
-      for(int i = 0; i < 100; i++) {
-        InterpreterState lstm_interp(lstm_function);
-        lstm_interp.runOneStage({input0, hx, cx, w_ih, w_hh}, outputs);
-      }
-  });
-  printTime("unfused", 1, [&] {
-    for(int i = 0; i < 100; i++) {
-      std::tie(hx, cx) = lstm(input0, hx, cx, w_ih, w_hh);
-    }
-  });
-
-  //std::cout << almostEqual(outputs[0],hx) << "\n";
-  JIT_ASSERT(exactlyEqual(outputs[0],hx));
-  JIT_ASSERT(exactlyEqual(outputs[1],cx));
-}
-
 void interpStageTest() {
     constexpr int batch_size = 4;
     constexpr int input_size = 256;
@@ -616,8 +497,6 @@ void interpStageTest() {
 }
 
 void runJITCPPTests() {
-  cpuJITTiming();
-  cpuTimingLSTM();
   interpTest();
   interpStageTest();
   codeTemplateTest();
