@@ -20,21 +20,30 @@ struct InterpreterAutogradFunction : public autograd::Function {
                               const std::vector<StageDetails>& stage_details)
     : interp_(code)
     , stage_details_(stage_details)
-    , stage_(0) {}
+    , stage_(0) {
+      std::cout << "interp ctor " << stage_ << "\n";
+    }
 
   InterpreterAutogradFunction(InterpreterState interp,
                               const std::vector<StageDetails>& stage_details,
                               std::size_t stage)
     : interp_(std::move(interp))
     , stage_details_(stage_details)
-    , stage_(stage) {}
+    , stage_(stage) {
+      std::cout << "interp ctor " << stage_ << "\n";
+    }
 
   virtual void willReleaseVariables() override {
     keep_graph_ = false;
   }
-
+  virtual inline void releaseVariables() override {
+    std::cout << "releaseVariables " << stage_ << "\n";
+    interp_.reset();
+  }
+  ~InterpreterAutogradFunction() {
+    std::cout << "interp dtor " << stage_ << "\n";
+  }
   virtual autograd::variable_list apply(const autograd::variable_list& inputs) override;
-
 private:
   InterpreterState interp_;
   const std::vector<StageDetails>& stage_details_;

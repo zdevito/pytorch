@@ -261,6 +261,7 @@ struct Stage {
 struct CodeImpl {
   CodeImpl(std::shared_ptr<Graph> & graph)
   : graph(graph) {
+    std::cout << *graph << "\n";
     int64_t cur_stage = -1;
     size_t input_pos = 0;
     size_t output_pos = 0;
@@ -397,8 +398,9 @@ struct OwnedRetainables {
   }
   ~OwnedRetainables() {
     for(auto & r : registers) {
-      if(isValid(r))
+      if(isValid(r)) {
         r->release();
+      }
     }
   }
   at::Retainable* operator[](size_t i) {
@@ -410,6 +412,7 @@ struct OwnedRetainables {
     JIT_ASSERT(registers[i] == nullptr);
     registers[i] = v;
     v = nullptr;
+    //std::cout << "took ownership " << i << " with count " << registers[i]->use_count() << "\n";
   }
   // return ownership of registers[i] to caller
   at::Retainable* detachOwnership(size_t i) {
@@ -421,6 +424,7 @@ struct OwnedRetainables {
   void reset(size_t i) {
     auto r = detachOwnership(i);
     if(isValid(r)) {
+      //std::cout << "resetting handle " << i << " with count before release " << r->use_count() << "\n";
       r->release();
     }
   }
@@ -431,6 +435,8 @@ private:
   list_of_retainable registers;
 };
 
+static int total_states = 0;
+
 // InterpreterState state that is held across stages and used to compute a Code
 struct InterpreterStateImpl {
   InterpreterStateImpl(const Code & function_)
@@ -438,6 +444,7 @@ struct InterpreterStateImpl {
     int_data(function->int_data.data()),
     bool_data(function->bool_data),
     registers(function->register_size) {
+      //std::cout << "InterpreterState alloc " << ++total_states << "\n";
   }
   void runOneStage(
     const std::vector<at::Tensor> & inputs,
@@ -493,8 +500,11 @@ struct InterpreterStateImpl {
       } else {
         outputs.push_back(unsafeToTensorShare(registers[reg]));
       }
-
+      //std::cout << "returning " << reg << " with count " << outputs.back().pImpl->use_count() << "\n";
     }
+  }
+  ~InterpreterStateImpl() {
+    //std::cout << "InterpreterState freed " << --total_states << "\n";
   }
   size_t current_stage = 0;
   std::shared_ptr<CodeImpl> function; // keep function alive
@@ -535,6 +545,11 @@ void InterpreterState::runOneStage(
 InterpreterState InterpreterState::clone() const {
   return InterpreterState(new InterpreterStateImpl(*pImpl));
 }
+
+void InterpreterState::reset() {
+  pImpl = nullptr;
+}
+
 InterpreterState::InterpreterState(InterpreterStateImpl * pImpl) : pImpl(pImpl) {}
 
 }}

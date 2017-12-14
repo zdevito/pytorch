@@ -47,7 +47,6 @@ class RNNBase(Module):
                 if bias:
                     param_names += ['bias_ih_l{}{}', 'bias_hh_l{}{}']
                 param_names = [x.format(layer, suffix) for x in param_names]
-
                 for name, param in zip(param_names, layer_params):
                     setattr(self, name, param)
                 self._all_weights.append(param_names)

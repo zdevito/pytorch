@@ -1022,6 +1022,7 @@ struct CppOp : public Node {
   }
 };
 inline Node * Graph::createCppOp(const std::shared_ptr<torch::autograd::Function> & fn, std::vector<VariableFlags> && var_flags) {
+  throw std::runtime_error("NOPE");
   auto op = new CppOp(this);
   return op->init(fn, std::move(var_flags));
 }

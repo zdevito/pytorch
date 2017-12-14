@@ -6,7 +6,7 @@ namespace at {
   struct Tensor;
 }
 namespace torch { namespace jit {
-  
+
 // The interpreter run Graphs with Tensor inputs and Tensor outputs
 // a separate component in the autograd handles unwrapping and wrapping
 // variable objects for use in the interpreter.
@@ -40,6 +40,7 @@ struct InterpreterState {
   // create a copy of InterpreterState with its current state
   // used when retain_graph=True so that stages can be re-run
   InterpreterState clone() const;
+  void reset();
 private:
   InterpreterState(InterpreterStateImpl * pImpl);
   std::shared_ptr<InterpreterStateImpl> pImpl;
