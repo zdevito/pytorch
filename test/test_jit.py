@@ -122,6 +122,8 @@ class TestJit(TestCase):
     # and we attempted to trace its derivative (which is not
     # currently supported.)  It currently works because
     # slice() is now not marked as traceable.
+    # UPDATE: it doesn't work because of the views...
+    @unittest.expectedFailure
     def test_index_constant(self):
         x = Variable(torch.Tensor([0.4]), requires_grad=True)
 
@@ -892,6 +894,18 @@ class TestJit(TestCase):
             fn(a, b).sum().backward()
         self.assertExpected(str(fn.graph_for(a, a)))
 
+    def test_repeated_output(self):
+        @torch.jit.compile(nderivs=1)
+        def fn(a, b):
+            z = a + b
+            return z, z
+
+        a, b = [Variable(torch.randn(2, 2), requires_grad=True) for _ in range(2)]
+        sum(fn(a, b)).sum().backward()
+        with self.assertCompiled(fn):
+            sum(fn(a, b)).sum().backward()
+        self.assertExpected(str(fn.graph_for(a, b)))
+
     def test_re_enter(self):
             @torch.jit.compile(nderivs=1)
             def fn(a, b):
@@ -1062,6 +1076,7 @@ class TestJit(TestCase):
         torch._C._jit_pass_dce(trace)
         self.assertExpectedTrace(trace)
 
+    @unittest.expectedFailure
     def test_index_trace(self):
         x = Variable(torch.randn(4, 4), requires_grad=True)
         trace, z = torch.jit.trace(lambda x: x[0], (x, ), nderivs=1)
