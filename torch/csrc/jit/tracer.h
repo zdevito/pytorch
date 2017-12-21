@@ -200,13 +200,17 @@ struct TraceInput {
 // NB: Why does this take an rvalue reference?  We need to get a non-const
 // reference to at::Tensor buffer to call unsafeGetTH, but you can't get this
 // out of a const vector (silly std::vector...)
-inline std::shared_ptr<TracingState> enter(std::vector<TraceInput>&& trace_inputs, std::size_t num_stages) {
+inline std::pair<std::shared_ptr<TracingState>, variable_list> enter(std::vector<TraceInput>&& trace_inputs, std::size_t num_stages) {
   auto state = std::make_shared<TracingState>(num_stages);
   variable_list inputs;
   for (auto& trace_input : trace_inputs) {
     if (trace_input.variable.defined()) {
       JIT_ASSERT(!trace_input.buffer.defined());
-      auto& input = trace_input.variable;
+      auto input = trace_input.variable;
+      auto * value_state = detail::getValueState(state, input, false);
+      if (value_state) {
+        input = input.view(input.sizes());
+      }
       auto input_node = state->graph->addInput(input.name());
       setValueTrace(state, input, input_node);
       input_node->inferTypeFrom(input.data());
@@ -224,7 +228,7 @@ inline std::shared_ptr<TracingState> enter(std::vector<TraceInput>&& trace_input
   state->var_flags[0].first = detail::getVarFlags(inputs);
   state->active = true;
   state->inputs = inputs;
-  return state;
+  return std::make_pair(state, inputs);
 }
 
 namespace detail {
