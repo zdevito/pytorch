@@ -209,6 +209,7 @@ inline std::pair<std::shared_ptr<TracingState>, variable_list> enter(std::vector
       auto input = trace_input.variable;
       auto * value_state = detail::getValueState(state, input, false);
       if (value_state) {
+        // See Note [Repeated inputs] in tracer.cpp
         input = input.view(input.sizes());
       }
       auto input_node = state->graph->addInput(input.name());

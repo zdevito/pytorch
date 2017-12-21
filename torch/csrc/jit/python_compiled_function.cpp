@@ -104,8 +104,19 @@ struct CompiledFunction {
       auto num_stages = grad_enabled_ ? fn_.nderivs_ + 1 : 1;
       auto enter_info = tracer::enter(fmap<TraceInput>(input_info.vars), num_stages);
       auto & trace = enter_info.first;
+      auto & new_vars = enter_info.second;
+
+      // Enter returns us a new list of Variables to use as inputs, so handle that.
+      std::size_t num_all_inputs = input_info.vars.size();
+      std::size_t num_captured = fn_.captured_vars_.size();
+      // Check that no captured Variables were replaced by enter. It's hard to handle that.
+      for (std::size_t i = num_all_inputs - num_captured; i < num_all_inputs; ++i) {
+        JIT_ASSERT(input_info.vars[i].get() == new_vars[i].get());
+      }
+      // Now only arguments to this function could have changed. Slice their vars out, and
+      // re-create the structure of args, but using new Variables.
       variable_list new_inputs(enter_info.second.begin(),
-                               enter_info.second.end() - fn_.captured_vars_.size());
+                               enter_info.second.end() - num_captured);
       THPObjectPtr new_args { unflatten(new_inputs, input_info.desc) };
 
       // Call back into Python function

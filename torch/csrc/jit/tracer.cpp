@@ -84,6 +84,11 @@ struct TraceEval : autograd::Eval {
       if (!input.defined()) continue;
       auto * value_state = detail::getValueState(tracing_state, input, false);
       if (value_state) {
+        // Note [Repeated inputs]
+        // Repeated inputs cause us some problems in here, because there's no way
+        // for us to attach a single Variable to two inputs, and to tell which one
+        // is used when performing an operation. To deal with it, we allocate a view
+        // of such input, and use that instead.
         inputs[i] = input = input.view(input.sizes());
       }
       setValueTrace(tracing_state, input, input_node);
