@@ -296,6 +296,7 @@ class TestJit(TestCase):
         y = Variable(torch.Tensor([0.7, 0.5]), requires_grad=True)
 
         trace, inputs = torch._C._tracer_enter((x, y), 0)
+
         def fn(x, y):
             w = (x + y) * (x + y) * (x + y)
             t = torch.tanh(w) + torch.tanh(w)
@@ -490,6 +491,7 @@ class TestJit(TestCase):
     def test_inplace_transplant(self):
         x = Variable(torch.Tensor([0]), requires_grad=True)
         trace, inputs = torch._C._tracer_enter((x,), 0)
+
         def fn(x):
             y = x.clone()
             y.add_(2)
@@ -521,6 +523,7 @@ class TestJit(TestCase):
 
         x = Variable(torch.Tensor([0]), requires_grad=True)
         trace, inputs = torch._C._tracer_enter((x,), 0)
+
         def fn(x):
             y = RegularFn.apply(x)
             y = InplaceFn.apply(y)
@@ -564,6 +567,7 @@ class TestJit(TestCase):
         y = a * b
 
         trace, inputs = torch._C._tracer_enter((x, y), 2)
+
         def fn(x, y):
             return y * 2 * x
         z = fn(*inputs)
@@ -590,6 +594,7 @@ class TestJit(TestCase):
         y = Variable(torch.randn(3, 3), requires_grad=True)
 
         trace, inputs = torch._C._tracer_enter((x, y), 2)
+
         def fn(x, y):
             return x.cross(y)
         z = fn(*inputs)
@@ -638,6 +643,7 @@ class TestJit(TestCase):
 
         def record_trace(num_backwards):
             trace, inputs = torch._C._tracer_enter((x, y), num_backwards)
+
             def fn(x, y):
                 return y * 2 * x
             z = fn(*inputs)
@@ -1095,10 +1101,12 @@ class TestJit(TestCase):
         self.assertExpectedTrace(trace)
 
     def test_shared_param(self):
+
         class MyModule(torch.nn.Module):
             def __init__(self):
                 super(MyModule, self).__init__()
                 self.b = self.a = nn.Parameter(torch.randn(2, 2))
+
             def forward(self, x):
                 return x * self.a + self.b
 
