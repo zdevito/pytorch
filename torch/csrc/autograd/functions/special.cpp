@@ -257,6 +257,10 @@ bool Eval::replaceSubgraph(const variable_list& inputs, const variable_list& _ou
   // Rebase outputs.
   auto this_shared = shared_from_this();
   std::unordered_set<Variable*> repeated_outputs;
+  // NB: every output can be in 3 states:
+  // - unique so far - only the else of second if is taken
+  // - repeated first time - first if + first branch of second if
+  // - repeated many times - first branch of second if only
   for (auto & output : relevant_outputs) {
     // This output is already rebased. This happens when there
     // the same Variable has been returned multiple times, and

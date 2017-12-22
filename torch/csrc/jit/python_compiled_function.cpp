@@ -111,12 +111,13 @@ struct CompiledFunction {
       std::size_t num_captured = fn_.captured_vars_.size();
       // Check that no captured Variables were replaced by enter. It's hard to handle that.
       for (std::size_t i = num_all_inputs - num_captured; i < num_all_inputs; ++i) {
-        JIT_ASSERT(input_info.vars[i].get() == new_vars[i].get());
+        TORCH_EXPECTM(input_info.vars[i].get() == new_vars[i].get(),
+                      "Some of the Variables captured by the JIT are repeated");
       }
       // Now only arguments to this function could have changed. Slice their vars out, and
       // re-create the structure of args, but using new Variables.
-      variable_list new_inputs(enter_info.second.begin(),
-                               enter_info.second.end() - num_captured);
+      variable_list new_inputs(new_vars.begin(),
+                               new_vars.end() - num_captured);
       THPObjectPtr new_args { unflatten(new_inputs, input_info.desc) };
 
       // Call back into Python function

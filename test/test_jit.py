@@ -1085,6 +1085,15 @@ class TestJit(TestCase):
         torch._C._jit_pass_dce(trace)
         self.assertExpectedTrace(trace)
 
+    # A temporary test to have any coverage for indexing ops. Delete this
+    # once the test above is fixed.
+    def test_index_inner(self):
+        x = Variable(torch.randn(4, 4), requires_grad=True)
+        trace, _ = torch.jit.trace(lambda x: x[0] + 0, (x,), nderivs=0)
+        torch._C._jit_pass_lint(trace)
+        torch._C._jit_pass_dce(trace)
+        self.assertExpectedTrace(trace)
+
     def test_shared_param(self):
         class MyModule(torch.nn.Module):
             def __init__(self):
