@@ -181,8 +181,8 @@ variable_list Eval::filterRelevantOutputs(const variable_list& inputs, const var
     if (ignored_grad_fns.count(std::make_pair(output.grad_fn(), output.output_nr())) > 0) continue;
     // TODO: Actually it might be correct but I haven't thought this through, so it's
     // better to be safe, and fix it when it will actually matter.
-    if (output.is_view())
-      throw std::runtime_error("Eval doesn't work with views as outputs");
+    // if (output.is_view())
+    //  throw std::runtime_error("Eval doesn't work with views as outputs");
     relevant_outputs.emplace_back(output);
   }
   return relevant_outputs;
