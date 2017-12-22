@@ -251,6 +251,18 @@ def trace(f, args=tuple(), kwargs=None, nderivs=0):
     return TracedModule(f, nderivs=nderivs)(*args, **kwargs)
 
 
+def _unique_state_dict(module, keep_vars=False):
+    state_dict = module.state_dict(keep_vars=keep_vars)
+    filtered_dict = type(state_dict)()
+    seen_ids = set()
+    for k, v in state_dict.items():
+        if id(v) in seen_ids:
+            continue
+        seen_ids.add(id(v))
+        filtered_dict[k] = v
+    return filtered_dict
+
+
 class TracedModule(Module):
     def __init__(self, inner, nderivs=0):
         super(TracedModule, self).__init__()
@@ -265,7 +277,7 @@ class TracedModule(Module):
         in_vars, in_desc = _flatten(args)
         # NOTE: use full state, because we need it for BatchNorm export
         # This differs from the compiler path, which doesn't support it at the moment.
-        module_state = list(self.state_dict(keep_vars=True).values())
+        module_state = list(_unique_state_dict(self, keep_vars=True).values())
         trace, all_trace_inputs = torch._C._tracer_enter(in_vars + module_state, self.nderivs)
         _tracing = True
         trace_inputs = _unflatten(all_trace_inputs[:len(in_vars)], in_desc)

@@ -1085,6 +1085,19 @@ class TestJit(TestCase):
         torch._C._jit_pass_dce(trace)
         self.assertExpectedTrace(trace)
 
+    def test_shared_param(self):
+        class MyModule(torch.nn.Module):
+            def __init__(self):
+                super(MyModule, self).__init__()
+                self.b = self.a = nn.Parameter(torch.randn(2, 2))
+            def forward(self, x):
+                return x * self.a + self.b
+
+        m = MyModule()
+        trace, _ = torch.jit.trace(m, (Variable(torch.randn(2, 2)),), nderivs=0)
+        self.assertEqual(len(list(trace.graph().inputs())), 2)
+        self.assertExpected(str(trace))
+
 
 if __name__ == '__main__':
     run_tests()
