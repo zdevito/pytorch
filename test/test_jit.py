@@ -1303,9 +1303,8 @@ class TestJit(TestCase):
         self.assertEqual(g2result, g2result2)
 
     def checkScript(self, script, inputs, outputs, optimize, name='func'):
-        cu = torch.jit._jit_script_compile(script)
-        graph = cu.get_graph(name)
-        ge = torch._C.GraphExecutor(graph, optimize)
+        cu = torch.jit.CompilationUnit(script, optimize)
+        ge = getattr(cu, name)
         outputs_ge = ge(*inputs)
         self.assertEqual(outputs, outputs_ge)
 
@@ -1554,6 +1553,21 @@ class TestJit(TestCase):
 
     def test_trace_annotation(self):
         @torch.jit.trace(Variable(torch.rand(1)))
+        def foo(a):
+            return a + a + a
+        s = Variable(torch.rand(2))
+        self.assertEqual(s + s + s, foo(s))
+
+    def test_script_cu(self):
+        cu = torch.jit.CompilationUnit('''
+            def foo(a) -> (b):
+                b = a
+        ''')
+        a = Variable(torch.rand(1))
+        self.assertEqual(a, cu.foo(a))
+
+    def test_script_annotation(self):
+        @torch.jit.script
         def foo(a):
             return a + a + a
         s = Variable(torch.rand(2))
