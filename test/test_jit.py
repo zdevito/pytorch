@@ -1692,7 +1692,7 @@ class TestJit(TestCase):
         self.assertEqual(cu.test_call_python(*inputs), outputs[0])
 
     def test_script_python_call_failure(self):
-        with self.assertRaisesRegex(RuntimeError, "Unknown function pyfunc2"):
+        with self.assertRaisesRegex(RuntimeError, "undefined value pyfunc2"):
             def pyfunc(a):
                 return a * 3.0
 
@@ -1732,7 +1732,7 @@ class TestJit(TestCase):
         self.assertEqual(foo(*inputs), outputs[0])
 
     def test_script_python_call_annotation_failure(self):
-        with self.assertRaisesRegex(RuntimeError, "Unknown function pyfunc2"):
+        with self.assertRaisesRegex(RuntimeError, "undefined value pyfunc2"):
             def pyfunc(a):
                 return a * 3.0
 
