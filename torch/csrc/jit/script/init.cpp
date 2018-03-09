@@ -177,11 +177,32 @@ void initJitScriptBindings(PyObject* module) {
       [](Module& self, const std::string& name) -> const Method& {
         return self.get_method(name);
       }, py::return_value_policy::reference_internal)
-      .def("_register_or_set_parameter", &Module::register_or_set_parameter)
+      .def("_register_parameter", &Module::register_parameter)
       .def("_register_module", &Module::register_module)
       .def("_set_parameter", &Module::set_parameter)
       .def("_get_parameter", &Module::get_parameter)
       .def("_get_module", &Module::get_module)
+      .def("_get_modules", [](Module& self) -> py::tuple {
+        auto & modules = self.get_modules();
+        py::tuple result(modules.size());
+        for(size_t i = 0; i < modules.size(); ++i) {
+          auto & nm = modules[i];
+          result[i] = py::cast(std::make_tuple(nm.name, nm.module));
+        }
+        return result;
+      })
+      .def("_get_parameters", [](Module& self) -> py::tuple {
+        auto & parameters = self.get_parameters();
+        py::tuple result(parameters.size());
+        for(size_t i = 0; i < parameters.size(); ++i) {
+          auto & p = parameters[i];
+          py::tuple pair(2);
+          pair[0] = p.name;
+          pair[1] = static_cast<const autograd::Variable&>(*p.slot());
+          result[i] = pair;
+        }
+        return result;
+      })
       .def("_get_attribute",[](Module& self, const std::string& name) -> py::object {
         switch(self.find_attribute(name)) {
           case NamedMember::Parameter:

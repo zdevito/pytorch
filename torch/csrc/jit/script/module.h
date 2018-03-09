@@ -5,6 +5,9 @@
 
 namespace torch { namespace jit { namespace script {
 
+// Note: because Method/Module are exposed to python these
+// classes use python method naming conventions
+
 struct Method {
   Method(std::string name, bool optimize)
   : name_(std::move(name))
@@ -82,8 +85,7 @@ private:
   GraphExecutor executor; // for execution
   // member_inputs are a list of additional arguments append to graph that are
   // inputs that come from the members of the Module or its submodules.
-  // each is a pointer to a slot in the module that owns this Method or a submethod
-  // of the module.
+  // each is a pointer to a slot in the module that owns this parameter
   // parameters and submodules can only be _added_ to script Modules to ensure
   // these pointers always stay valid
   std::vector<at::Tensor*> member_inputs;
@@ -118,7 +120,7 @@ struct NamedParameter {
 private:
   // the extra level of indirection allows Methods to safely store pointers
   // to the slots where parameters are kept while also allow parameters
-  // to be reassign
+  // to be reassigned
   std::unique_ptr<at::Tensor> parameter;
 };
 
@@ -144,15 +146,12 @@ struct Module : public std::enable_shared_from_this<Module> {
   Module(bool optimize)
   : optimize(optimize) {}
 
-  void register_parameter(const std::string & name, at::Tensor v) {
-    parameters.push_back(NamedParameter(name, std::move(v)));
-    add_member(name, NamedMember::Parameter, parameters.size() - 1);
-  }
-  void register_or_set_parameter(const std::string & name, autograd::Variable v) {
+  void register_parameter(const std::string & name, autograd::Variable v) {
     if(find_attribute(name) == NamedMember::Parameter) {
       set_parameter(name, v);
     } else {
-      register_parameter(name, v);
+      parameters.push_back(NamedParameter(name, std::move(v)));
+      add_member(name, NamedMember::Parameter, parameters.size() - 1);
     }
   }
   void register_module(const std::string& name, std::shared_ptr<Module> module) {
@@ -197,10 +196,11 @@ struct Module : public std::enable_shared_from_this<Module> {
     return it->second.kind;
   }
 
-  void dump() const {
-    for(auto entry : members) {
-      std::cout << entry.first << ": " << NamedMember::kind_string(entry.second.kind) << "\n";
-    }
+  const std::vector<NamedModule>& get_modules() const {
+    return modules;
+  }
+  const  std::vector<NamedParameter>& get_parameters() const {
+    return parameters;
   }
 
 private:

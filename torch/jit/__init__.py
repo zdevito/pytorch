@@ -650,6 +650,88 @@ def script_method(fn):
     return ScriptMethodStub(createResolutionCallback(), get_jit_ast(fn))
 
 
+# OrderedDict view needs:
+#  x not in view -
+#  x in view -
+#  view[name] = ...
+#  view.values()
+#  del view[name]
+#  view.items()
+#  view.keys(),
+#
+
+class OrderedDictWrapper(object):
+    def __init__(self, module):
+        self.module_ref = weakref.ref(module)
+        self.expected_type = None
+
+    @property
+    def module(self):
+        r = self.module_ref()
+        if r is None:
+            raise RuntimeError("_parameters or _modules alive after module is dead")
+        return r
+
+    def __contains__(self, k):
+        v = self.module._get_attribute(k)
+        return isinstance(v, self.expected_type)
+
+    def keys(self):
+        return [k for k, v in self.items()]
+
+    def values(self):
+        return [v for k, v in self.items()]
+
+    def __getitem__(self, k):
+        m = self.module._get_attribute(k)
+        if not isinstance(m, self.expected_type):
+            raise KeyError(k)
+        return m
+
+    def __delitem__(self, k, v):
+        raise RuntimeError("cannot methods or parameters of a script module")
+
+    def items(self):
+        raise NotImplementedError("items not implemented")
+
+    def __setitem__(self, k, v):
+        raise NotImplementedError("__setitem__ not implemented")
+
+
+class OrderedModuleDict(OrderedDictWrapper):
+    def __init__(self, module):
+        super(OrderedModuleDict, self).__init__(module)
+        self.expected_type = torch._C.ScriptModule
+
+    def items(self):
+        return self.module._get_modules()
+
+    # TODO: allow for python modules in addition to script modules
+    def __setitem__(self, k, v):
+        self.module._register_module(k, v)
+        # note: script modules are subclassed in python and the
+        # C++ script::Module class will not hold references to them
+        # to ensure that you always get the same python value here
+        # we store it as a native attribute _in addition to_
+        # registering it with the C++ script::Module
+        object.__setattr__(self.module, k, v)
+
+
+class OrderedParameterDict(OrderedDictWrapper):
+    def __init__(self, module):
+        super(OrderedParameterDict, self).__init__(module)
+        self.expected_type = Variable
+
+    def items(self):
+        return self.module._get_parameters()
+
+    def __setitem__(self, k, v):
+        self.module._register_parameter(k, v)
+
+    def __delitem__(self, k, v):
+        raise RuntimeError("cannot delete parameters from a script module")
+
+
 class ScriptMeta(type(torch._C.ScriptModule)):
     # this has to inherit from pybind11's metaclass otherwise we get
     # issues because ScriptModule inherits from torch._C.ScriptModule,
@@ -675,30 +757,23 @@ class ScriptMeta(type(torch._C.ScriptModule)):
         return super(ScriptMeta, cls).__init__(name, bases, attrs)
 
 
-class ScriptModule(with_metaclass(ScriptMeta, torch._C.ScriptModule)):
-
+class ScriptModule(with_metaclass(ScriptMeta, Module, torch._C.ScriptModule)):
     def __init__(self, optimize=True):
-        super(ScriptModule, self).__init__(optimize)
-
-    def __setattr__(self, name, value):
-        if isinstance(value, Parameter):
-            self._register_or_set_parameter(name, value)
-        elif isinstance(value, ScriptModule):
-            self._register_module(name, value)
-            # note: script modules are subclassed in python and the
-            # C++ script::Module class will not hold references to them
-            # to ensure that you always get the same python value here
-            # we store it as a native attribute _in addition to_
-            # registering it with the C++ script::Module
-            object.__setattr__(self, name, value)
-        else:
-            object.__setattr__(self, name, value)
+        Module.__init__(self)
+        torch._C.ScriptModule.__init__(self, optimize)
+        self._parameters = OrderedParameterDict(self)
+        self._modules = OrderedModuleDict(self)
 
     def __getattr__(self, attr):
         r = self._get_attribute(attr)
-        if r is None:
-            raise AttributeError("'{}' object has no attribute '{}'".format(self.__class__.__name__, attr))
-        return r
+        if isinstance(r, torch._C.ScriptMethod):
+            return r
+        return Module.__getattr__(self, attr)
+
+    # Module already has this method defined, so we
+    # need to override it and send it through the ScriptModule lookup
+    def forward(self, *args, **kwargs):
+        return self.__getattr__('forward')(*args, **kwargs)
 
     def define(self, lang):
         rcb = createResolutionCallback()
