@@ -1785,12 +1785,11 @@ class TestJit(TestCase):
             del linear_submodule.weight
 
         # Submodules can't be called
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(AttributeError):
             linear_submodule(x)
 
         # Type casts
-        with self.assertRaises(RuntimeError):
-            linear_submodule.cuda()
+        linear_submodule.cuda()
         traced_model.float().cuda()
         cuda_out = traced_model(x.float().cuda())
         traced_model.cpu()
