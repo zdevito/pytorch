@@ -1785,7 +1785,7 @@ class TestJit(TestCase):
             del linear_submodule.weight
 
         # Submodules can't be called
-        with self.assertRaises(AttributeError):
+        with self.assertRaises(RuntimeError):
             linear_submodule(x)
 
         # Type casts
