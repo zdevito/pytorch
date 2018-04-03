@@ -330,7 +330,6 @@ lstm(at::Tensor input,
       at::Tensor w_ih,
       at::Tensor w_hh) {
   auto gates = input.mm(t_use(w_ih)) + hx.mm(t_use(w_hh));
-
   auto chunked_gates = gates.chunk(4, 1);
   auto ingate     = chunked_gates[0];
   auto forgetgate = chunked_gates[1];
@@ -927,8 +926,299 @@ TEST_CASE( "jit test CUDA", "[cuda]" ) {
 
 #endif
 
+
+// mm, chunk, sigmoid, tanh, +, *
+
+struct TenImpl : at::Retainable {
+  int64_t sizes[2];
+  float * data;
+};
+
+struct Ten;
+
+Ten plus(const Ten& a, const Ten& b);
+Ten mul(const Ten& a, const Ten& b);
+Ten sigmoid(const Ten& a);
+Ten tanh(const Ten& a);
+Ten mm(const Ten& a, const Ten& b);
+std::vector<Ten> chunk4(const Ten& a);
+Ten load(const at::Tensor& a);
+at::Tensor save(const Ten& a);
+
+// Ten is the base class for Tensor which handles the reference counting
+struct Ten {
+  Ten(): Ten(nullptr, false) {}
+  Ten(TenImpl * self, bool retain)
+  : pImpl(self) {
+    if(retain && pImpl)
+      pImpl->retain();
+  }
+  Ten(const Ten & rhs)
+  : pImpl(rhs.pImpl) {
+    if (pImpl)
+      pImpl->retain();
+  }
+  Ten(Ten && rhs) noexcept
+  : pImpl(rhs.pImpl) {
+    rhs.pImpl = nullptr;
+  }
+  ~Ten() {
+    if (pImpl)
+      pImpl->release();
+  }
+  Ten & operator=(Ten && rhs) & {
+    rhs.swap(*this);
+    return *this;
+  }
+  Ten & operator=(Ten const & rhs) & {
+      //Ten ctor retains original rhs.pImpl
+      //then rhs.pImpl is swapped with this->pImpl
+      //finally Ten dtor releases rhs.pImpl, which was originally this->pImpl
+      Ten(rhs).swap(*this);
+      return *this;
+  }
+  void reset() {
+    Ten().swap(*this);
+  }
+  void reset(TenImpl * rhs) {
+    Ten(rhs, true).swap(*this);
+  }
+  void reset(TenImpl * rhs, bool retain) {
+    Ten(rhs, retain).swap(*this );
+  }
+  void swap(Ten & rhs) {
+    TenImpl * tmp = pImpl;
+    pImpl = rhs.pImpl;
+    rhs.pImpl = tmp;
+  }
+  TenImpl * get() const {
+    return pImpl;
+  }
+  TenImpl * detach() {
+    TenImpl * ret = pImpl;
+    pImpl = nullptr;
+    return ret;
+  }
+  float* data() const {
+    return pImpl->data;
+  }
+
+  bool defined() const {
+    return pImpl;
+  }
+  Ten operator+(const Ten& b) const {
+    return plus(*this, b);
+  }
+  Ten operator*(const Ten& b) const {
+    return mul(*this, b);
+  }
+  Ten mm(const Ten& b) const {
+    return jit::mm(*this, b);
+  }
+  Ten sigmoid() const {
+    return jit::sigmoid(*this);
+  }
+  Ten tanh() const {
+    return jit::tanh(*this);
+  }
+  std::vector<Ten> chunk4() {
+    return jit::chunk4(*this);
+  }
+  at::ArrayRef<int64_t> sizes() const {
+    return ArrayRef<int64_t>(pImpl->sizes, 2);
+  }
+public:
+  TenImpl * pImpl;
+};
+
+Ten create(at::ArrayRef<int64_t> sizes) {
+  auto r = Ten(new TenImpl, false);
+  r.pImpl->sizes[0] = sizes[0];
+  r.pImpl->sizes[1] = sizes[1];
+  std::cout << sizes[0] << " " << sizes[1] << "\n";
+  r.pImpl->data = new float[sizes[0]*sizes[1]];
+  return r;
+}
+
+Ten plus(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] + b_data[i];
+  }
+  return c;
+}
+
+Ten mul(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] * b_data[i];
+  }
+  return c;
+}
+
+Ten sigmoid(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = 1.f / (1.f + expf(-a_data[i]));
+  }
+  return c;
+}
+
+Ten tanh(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = tanhf(a_data[i]);
+  }
+  return c;
+}
+
+Ten mm(const Ten& a, const Ten& b) {
+  auto M = a.sizes()[0];
+  auto K = a.sizes()[1];
+  JIT_ASSERT(K == b.sizes()[0]);
+  auto N = b.sizes()[1];
+  auto c = create({M, N});
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+
+  for(int64_t m = 0; m < M; m++) {
+    for(int64_t n = 0; n < N; n++) {
+      float s = 0;
+      for(int64_t k = 0; k < K; k++) {
+        s += a_data[m*K + k] * b_data[k*N + n];
+      }
+      c_data[m*N + n] = s;
+    }
+  }
+  return c;
+}
+
+std::vector<Ten> chunk4(const Ten& a) {
+  JIT_ASSERT(a.sizes()[1] % 4 == 0);
+  auto B = a.sizes()[0];
+  auto M = a.sizes()[1];
+  auto N = M / 4;
+  std::vector<Ten> result = { create({B, N}), create({B, N}), create({B, N}), create({B, N}) };
+  auto a_data = a.data();
+  for(int64_t b = 0; b < B; b++) {
+    for(int64_t i = 0; i < 4; i++) {
+      for(int64_t n = 0; n < N; n++) {
+        result[i].data()[b*N + n] = a_data[b*M + i*N + n];
+      }
+    }
+  }
+  return result;
+}
+
+Ten load(const at::Tensor& a) {
+  JIT_ASSERT(a.is_contiguous());
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data<float>();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+
+at::Tensor save(const Ten& a) {
+  auto c = at::CPU(at::kFloat).tensor(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data<float>();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+std::pair<Ten, Ten>
+lstm_t(Ten input,
+      Ten hx,
+      Ten cx,
+      Ten w_ih,
+      Ten w_hh) {
+  auto gates = input.mm(w_ih) + hx.mm(w_hh);
+
+  auto chunked_gates = gates.chunk4();
+  auto ingate     = chunked_gates[0];
+  auto forgetgate = chunked_gates[1];
+  auto cellgate = chunked_gates[2];
+  auto outgate    = chunked_gates[3];
+
+  ingate = ingate.sigmoid();
+  outgate = outgate.sigmoid();
+  cellgate = cellgate.tanh();
+  forgetgate = forgetgate.sigmoid();
+
+  auto cy = (forgetgate * cx) + (ingate * cellgate);
+  auto hy = outgate * cy.tanh();
+
+  return {hy, cy};
+}
+
+void doit() {
+  constexpr int batch_size = 2;
+  constexpr int input_size = 3;
+
+  int hidden_size = 2*input_size;
+
+  auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
+  auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto cx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto w_ih  = at::randn(at::CPU(at::kFloat), {input_size, 4 * hidden_size});
+  auto w_hh  = at::randn(at::CPU(at::kFloat), {hidden_size, 4 * hidden_size});
+
+  auto r0 = torch::jit::lstm(input, hx, cx, w_ih, w_hh);
+
+  auto input_t = load(input);
+  auto hx_t    = load(hx);
+  auto cx_t    = load(cx);
+  auto w_ih_t  = load(w_ih);
+  auto w_hh_t  = load(w_hh);
+
+  auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+
+  auto r0_0 = r0.first;
+  auto r0_1 = r0.second;
+  auto r1_0 = save(r1.first);
+  auto r1_1 = save(r1.second);
+  std::cout << r0_0 << "\n";
+  std::cout << r1_0 << "\n";
+
+  JIT_ASSERT(torch::jit::almostEqual(r0_0, r1_0));
+  JIT_ASSERT(torch::jit::almostEqual(r0_1, r1_1));
+}
+
 std::string runJITCPPTests() {
   std::stringstream out;
+  doit();
+  std::cout << "DONE\n";
   testControlFlow();
   testGraphExecutor();
   testBlocks(out);
