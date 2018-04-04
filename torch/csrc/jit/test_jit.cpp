@@ -1,3 +1,68 @@
+#include <algorithm>
+#include <cctype>
+#include <locale>
+#include <iostream>
+#include <fstream>
+#include <chrono>
+#include <system_error>
+#include <sstream>
+
+#include <stdio.h>
+#include <sched.h>
+#include <errno.h>
+
+inline uint64_t getTime() {
+  using namespace std::chrono;
+  using clock = std::conditional<high_resolution_clock::is_steady, high_resolution_clock, steady_clock>::type;
+  return duration_cast<nanoseconds>(clock::now().time_since_epoch()).count();
+}
+
+/**
+ * cpu_pin - pin down the local thread to a core
+ * @cpu: the target core
+ */
+void cpu_pin(unsigned int cpu)
+{
+  int ret;
+  cpu_set_t mask;
+
+  CPU_ZERO(&mask);
+  CPU_SET(cpu, &mask);
+
+  ret = sched_setaffinity(0, sizeof(mask), &mask);
+  if (ret) throw std::system_error(errno, std::system_category());
+}
+
+// Credit: https://stackoverflow.com/questions/216823/whats-the-best-way-to-trim-stdstring
+static inline void rtrim(std::string &s) {
+  s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) {
+      return !std::isspace(ch);
+  }).base(), s.end());
+}
+
+/**
+ * Check that the power governor for a core is "performance",
+ * logging a warning if it is not.
+ */
+void check_cpu_governor(unsigned int cpu)
+{
+  std::ostringstream fpss;
+  fpss << "/sys/devices/system/cpu/cpu" << cpu << "/cpufreq/scaling_governor";
+  std::ifstream f(fpss.str());
+  if (!f.is_open()) {
+    std::cerr << "WARNING: Could not find CPU " << cpu << " governor information in filesystem (are you running on Linux?)\n";
+    std::cerr << "The file '" << fpss.str() << "' did not exist.\n";
+  }
+  std::ostringstream r;
+  r << f.rdbuf();
+  std::string gov(r.str());
+  rtrim(gov);
+  if (gov != "performance") {
+    std::cerr << "WARNING: CPU " << cpu << " governor is " << gov << ", which could lead to variance in performance.\n";
+    std::cerr << "Run 'echo performance > " << fpss.str() << "' as root to turn off power scaling.\n";
+  }
+}
+
 #ifndef NO_PYTHON
 #include <Python.h>
 
@@ -929,21 +994,27 @@ TEST_CASE( "jit test CUDA", "[cuda]" ) {
 
 // mm, chunk, sigmoid, tanh, +, *
 
-struct TenImpl : at::Retainable {
-  int64_t sizes[2];
-  float * data;
-};
+namespace direct {
 
 struct Ten;
 
-Ten plus(const Ten& a, const Ten& b);
-Ten mul(const Ten& a, const Ten& b);
-Ten sigmoid(const Ten& a);
-Ten tanh(const Ten& a);
-Ten mm(const Ten& a, const Ten& b);
-std::vector<Ten> chunk4(const Ten& a);
+Ten plus_f(const Ten& a, const Ten& b);
+Ten mul_f(const Ten& a, const Ten& b);
+Ten sigmoid_f(const Ten& a);
+Ten tanh_f(const Ten& a);
+Ten mm_f(const Ten& a, const Ten& b);
+std::vector<Ten> chunk4_f(const Ten& a);
 Ten load(const at::Tensor& a);
 at::Tensor save(const Ten& a);
+
+struct TenImpl : at::Retainable {
+  int64_t sizes[2];
+  float * data;
+  ~TenImpl() {
+    delete [] data;
+  }
+};
+
 
 // Ten is the base class for Tensor which handles the reference counting
 struct Ten {
@@ -1007,22 +1078,22 @@ struct Ten {
     return pImpl;
   }
   Ten operator+(const Ten& b) const {
-    return plus(*this, b);
+    return plus_f(*this, b);
   }
   Ten operator*(const Ten& b) const {
-    return mul(*this, b);
+    return mul_f(*this, b);
   }
   Ten mm(const Ten& b) const {
-    return jit::mm(*this, b);
+    return mm_f(*this, b);
   }
   Ten sigmoid() const {
-    return jit::sigmoid(*this);
+    return sigmoid_f(*this);
   }
   Ten tanh() const {
-    return jit::tanh(*this);
+    return tanh_f(*this);
   }
   std::vector<Ten> chunk4() {
-    return jit::chunk4(*this);
+    return chunk4_f(*this);
   }
   at::ArrayRef<int64_t> sizes() const {
     return ArrayRef<int64_t>(pImpl->sizes, 2);
@@ -1035,12 +1106,11 @@ Ten create(at::ArrayRef<int64_t> sizes) {
   auto r = Ten(new TenImpl, false);
   r.pImpl->sizes[0] = sizes[0];
   r.pImpl->sizes[1] = sizes[1];
-  std::cout << sizes[0] << " " << sizes[1] << "\n";
   r.pImpl->data = new float[sizes[0]*sizes[1]];
   return r;
 }
 
-Ten plus(const Ten& a, const Ten& b) {
+Ten plus_f(const Ten& a, const Ten& b) {
   JIT_ASSERT(a.sizes().equals(b.sizes()));
   auto c = create(a.sizes());
   auto sizes = a.sizes();
@@ -1054,7 +1124,7 @@ Ten plus(const Ten& a, const Ten& b) {
   return c;
 }
 
-Ten mul(const Ten& a, const Ten& b) {
+Ten mul_f(const Ten& a, const Ten& b) {
   JIT_ASSERT(a.sizes().equals(b.sizes()));
   auto c = create(a.sizes());
   auto sizes = a.sizes();
@@ -1068,7 +1138,7 @@ Ten mul(const Ten& a, const Ten& b) {
   return c;
 }
 
-Ten sigmoid(const Ten& a) {
+Ten sigmoid_f(const Ten& a) {
   auto c = create(a.sizes());
   auto sizes = a.sizes();
   auto a_data = a.data();
@@ -1080,7 +1150,7 @@ Ten sigmoid(const Ten& a) {
   return c;
 }
 
-Ten tanh(const Ten& a) {
+Ten tanh_f(const Ten& a) {
   auto c = create(a.sizes());
   auto sizes = a.sizes();
   auto a_data = a.data();
@@ -1092,7 +1162,7 @@ Ten tanh(const Ten& a) {
   return c;
 }
 
-Ten mm(const Ten& a, const Ten& b) {
+Ten mm_f(const Ten& a, const Ten& b) {
   auto M = a.sizes()[0];
   auto K = a.sizes()[1];
   JIT_ASSERT(K == b.sizes()[0]);
@@ -1114,7 +1184,7 @@ Ten mm(const Ten& a, const Ten& b) {
   return c;
 }
 
-std::vector<Ten> chunk4(const Ten& a) {
+std::vector<Ten> chunk4_f(const Ten& a) {
   JIT_ASSERT(a.sizes()[1] % 4 == 0);
   auto B = a.sizes()[0];
   auto M = a.sizes()[1];
@@ -1183,10 +1253,10 @@ lstm_t(Ten input,
 }
 
 void doit() {
-  constexpr int batch_size = 2;
-  constexpr int input_size = 3;
+  constexpr int batch_size = 1;
+  constexpr int input_size = 1;
 
-  int hidden_size = 2*input_size;
+  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -1208,16 +1278,1880 @@ void doit() {
   auto r0_1 = r0.second;
   auto r1_0 = save(r1.first);
   auto r1_1 = save(r1.second);
-  std::cout << r0_0 << "\n";
-  std::cout << r1_0 << "\n";
 
   JIT_ASSERT(torch::jit::almostEqual(r0_0, r1_0));
   JIT_ASSERT(torch::jit::almostEqual(r0_1, r1_1));
+  auto start = getTime();
+  size_t i;
+  constexpr auto repeat = 100;
+  for(i = 0; (getTime() - start) < 1000ULL*1000ULL*100ULL; ++i) {
+    for(int j = 0; j < repeat; j++) {
+      auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+    }
+  }
+
+  std::cout << "direct " << (getTime() - start)/ (double)(i*repeat) << "\n";
 }
+
+}
+
+namespace vtable {
+
+struct Ten;
+
+Ten plus_f(const Ten& a, const Ten& b);
+Ten mul_f(const Ten& a, const Ten& b);
+Ten sigmoid_f(const Ten& a);
+Ten tanh_f(const Ten& a);
+Ten mm_f(const Ten& a, const Ten& b);
+std::vector<Ten> chunk4_f(const Ten& a);
+Ten load(const at::Tensor& a);
+at::Tensor save(const Ten& a);
+#define CONCAT_(x,y) x##y
+#define CONCAT(x,y) CONCAT_(x,y)
+#define FNAME() CONCAT(foo,__LINE__)
+
+struct TenImpl : at::Retainable {
+  int64_t sizes[2];
+  float * data;
+  // add a ton of fake vtable entries to simulate perf when all operators exist
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual Ten plus(const Ten& a, const Ten& b);
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual Ten mul(const Ten& a, const Ten& b);
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual Ten sigmoid(const Ten& a);
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual Ten tanh(const Ten& a);
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual Ten mm(const Ten& a, const Ten& b);
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual void FNAME()() {
+    std::cout << __LINE__ << "\n";
+  }
+  virtual std::vector<Ten> chunk4(const Ten& a);
+
+  ~TenImpl() {
+    delete [] data;
+  }
+};
+
+
+// Ten is the base class for Tensor which handles the reference counting
+struct Ten {
+  Ten(): Ten(nullptr, false) {}
+  Ten(TenImpl * self, bool retain)
+  : pImpl(self) {
+    if(retain && pImpl)
+      pImpl->retain();
+  }
+  Ten(const Ten & rhs)
+  : pImpl(rhs.pImpl) {
+    if (pImpl)
+      pImpl->retain();
+  }
+  Ten(Ten && rhs) noexcept
+  : pImpl(rhs.pImpl) {
+    rhs.pImpl = nullptr;
+  }
+  ~Ten() {
+    if (pImpl)
+      pImpl->release();
+  }
+  Ten & operator=(Ten && rhs) & {
+    rhs.swap(*this);
+    return *this;
+  }
+  Ten & operator=(Ten const & rhs) & {
+      //Ten ctor retains original rhs.pImpl
+      //then rhs.pImpl is swapped with this->pImpl
+      //finally Ten dtor releases rhs.pImpl, which was originally this->pImpl
+      Ten(rhs).swap(*this);
+      return *this;
+  }
+  void reset() {
+    Ten().swap(*this);
+  }
+  void reset(TenImpl * rhs) {
+    Ten(rhs, true).swap(*this);
+  }
+  void reset(TenImpl * rhs, bool retain) {
+    Ten(rhs, retain).swap(*this );
+  }
+  void swap(Ten & rhs) {
+    TenImpl * tmp = pImpl;
+    pImpl = rhs.pImpl;
+    rhs.pImpl = tmp;
+  }
+  TenImpl * get() const {
+    return pImpl;
+  }
+  TenImpl * detach() {
+    TenImpl * ret = pImpl;
+    pImpl = nullptr;
+    return ret;
+  }
+  float* data() const {
+    return pImpl->data;
+  }
+
+  bool defined() const {
+    return pImpl;
+  }
+  Ten operator+(const Ten& b) const {
+    return pImpl->plus(*this, b);
+  }
+  Ten operator*(const Ten& b) const {
+    return pImpl->mul(*this, b);
+  }
+  Ten mm(const Ten& b) const {
+    return pImpl->mm(*this, b);
+  }
+  Ten sigmoid() const {
+    return pImpl->sigmoid(*this);
+  }
+  Ten tanh() const {
+    return pImpl->tanh(*this);
+  }
+  std::vector<Ten> chunk4() {
+    return pImpl->chunk4(*this);
+  }
+  at::ArrayRef<int64_t> sizes() const {
+    return ArrayRef<int64_t>(pImpl->sizes, 2);
+  }
+public:
+  TenImpl * pImpl;
+};
+
+ Ten TenImpl::plus(const Ten& a, const Ten& b) {
+  return plus_f(a, b);
+}
+ Ten TenImpl::mul(const Ten& a, const Ten& b) {
+  return mul_f(a, b);
+}
+ Ten TenImpl::sigmoid(const Ten& a) {
+  return sigmoid_f(a);
+}
+ Ten TenImpl::tanh(const Ten& a) {
+  return tanh_f(a);
+}
+Ten TenImpl::mm(const Ten& a, const Ten& b) {
+    return mm_f(a,b);
+}
+std::vector<Ten> TenImpl::chunk4(const Ten& a) {
+  return chunk4_f(a);
+}
+
+Ten create(at::ArrayRef<int64_t> sizes) {
+  auto r = Ten(new TenImpl, false);
+  r.pImpl->sizes[0] = sizes[0];
+  r.pImpl->sizes[1] = sizes[1];
+  r.pImpl->data = new float[sizes[0]*sizes[1]];
+  return r;
+}
+
+Ten plus_f(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] + b_data[i];
+  }
+  return c;
+}
+
+Ten mul_f(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] * b_data[i];
+  }
+  return c;
+}
+
+Ten sigmoid_f(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = 1.f / (1.f + expf(-a_data[i]));
+  }
+  return c;
+}
+
+Ten tanh_f(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = tanhf(a_data[i]);
+  }
+  return c;
+}
+
+Ten mm_f(const Ten& a, const Ten& b) {
+  auto M = a.sizes()[0];
+  auto K = a.sizes()[1];
+  JIT_ASSERT(K == b.sizes()[0]);
+  auto N = b.sizes()[1];
+  auto c = create({M, N});
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+
+  for(int64_t m = 0; m < M; m++) {
+    for(int64_t n = 0; n < N; n++) {
+      float s = 0;
+      for(int64_t k = 0; k < K; k++) {
+        s += a_data[m*K + k] * b_data[k*N + n];
+      }
+      c_data[m*N + n] = s;
+    }
+  }
+  return c;
+}
+
+std::vector<Ten> chunk4_f(const Ten& a) {
+  JIT_ASSERT(a.sizes()[1] % 4 == 0);
+  auto B = a.sizes()[0];
+  auto M = a.sizes()[1];
+  auto N = M / 4;
+  std::vector<Ten> result = { create({B, N}), create({B, N}), create({B, N}), create({B, N}) };
+  auto a_data = a.data();
+  for(int64_t b = 0; b < B; b++) {
+    for(int64_t i = 0; i < 4; i++) {
+      for(int64_t n = 0; n < N; n++) {
+        result[i].data()[b*N + n] = a_data[b*M + i*N + n];
+      }
+    }
+  }
+  return result;
+}
+
+Ten load(const at::Tensor& a) {
+  JIT_ASSERT(a.is_contiguous());
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data<float>();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+
+at::Tensor save(const Ten& a) {
+  auto c = at::CPU(at::kFloat).tensor(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data<float>();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+std::pair<Ten, Ten>
+lstm_t(Ten input,
+      Ten hx,
+      Ten cx,
+      Ten w_ih,
+      Ten w_hh) {
+  auto gates = input.mm(w_ih) + hx.mm(w_hh);
+
+  auto chunked_gates = gates.chunk4();
+  auto ingate     = chunked_gates[0];
+  auto forgetgate = chunked_gates[1];
+  auto cellgate = chunked_gates[2];
+  auto outgate    = chunked_gates[3];
+
+  ingate = ingate.sigmoid();
+  outgate = outgate.sigmoid();
+  cellgate = cellgate.tanh();
+  forgetgate = forgetgate.sigmoid();
+
+  auto cy = (forgetgate * cx) + (ingate * cellgate);
+  auto hy = outgate * cy.tanh();
+
+  return {hy, cy};
+}
+
+void doit() {
+  constexpr int batch_size = 1;
+  constexpr int input_size = 1;
+
+  int hidden_size = 1;
+
+  auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
+  auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto cx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto w_ih  = at::randn(at::CPU(at::kFloat), {input_size, 4 * hidden_size});
+  auto w_hh  = at::randn(at::CPU(at::kFloat), {hidden_size, 4 * hidden_size});
+
+  auto r0 = torch::jit::lstm(input, hx, cx, w_ih, w_hh);
+
+  auto input_t = load(input);
+  auto hx_t    = load(hx);
+  auto cx_t    = load(cx);
+  auto w_ih_t  = load(w_ih);
+  auto w_hh_t  = load(w_hh);
+
+  auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+
+  auto r0_0 = r0.first;
+  auto r0_1 = r0.second;
+  auto r1_0 = save(r1.first);
+  auto r1_1 = save(r1.second);
+
+  JIT_ASSERT(torch::jit::almostEqual(r0_0, r1_0));
+  JIT_ASSERT(torch::jit::almostEqual(r0_1, r1_1));
+  auto start = getTime();
+  size_t i;
+  constexpr auto repeat = 100;
+  for(i = 0; (getTime() - start) < 1000ULL*1000ULL*100ULL; ++i) {
+    for(int j = 0; j < repeat; j++) {
+      auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+    }
+  }
+  std::cout << "vtable " << (getTime() - start)/ (double)(i*repeat) << "\n";
+}
+
+}
+
+namespace custom_vtable {
+
+struct Ten;
+
+Ten plus_f(const Ten& a, const Ten& b);
+Ten mul_f(const Ten& a, const Ten& b);
+Ten sigmoid_f(const Ten& a);
+Ten tanh_f(const Ten& a);
+Ten mm_f(const Ten& a, const Ten& b);
+std::vector<Ten> chunk4_f(const Ten& a);
+Ten load(const at::Tensor& a);
+at::Tensor save(const Ten& a);
+
+struct TenImpl : at::Retainable {
+  void ** vtable;
+  int64_t sizes[2];
+  float * data;
+  ~TenImpl() {
+    delete [] data;
+  }
+};
+
+enum {
+  ADD = 66,
+  MUL = 133,
+  SIGMOID = 200,
+  TANH = 266,
+  MM = 333,
+  CHUNK = 400
+};
+
+
+// Ten is the base class for Tensor which handles the reference counting
+struct Ten {
+  Ten(): Ten(nullptr, false) {}
+  Ten(TenImpl * self, bool retain)
+  : pImpl(self) {
+    if(retain && pImpl)
+      pImpl->retain();
+  }
+  Ten(const Ten & rhs)
+  : pImpl(rhs.pImpl) {
+    if (pImpl)
+      pImpl->retain();
+  }
+  Ten(Ten && rhs) noexcept
+  : pImpl(rhs.pImpl) {
+    rhs.pImpl = nullptr;
+  }
+  ~Ten() {
+    if (pImpl)
+      pImpl->release();
+  }
+  Ten & operator=(Ten && rhs) & {
+    rhs.swap(*this);
+    return *this;
+  }
+  Ten & operator=(Ten const & rhs) & {
+      //Ten ctor retains original rhs.pImpl
+      //then rhs.pImpl is swapped with this->pImpl
+      //finally Ten dtor releases rhs.pImpl, which was originally this->pImpl
+      Ten(rhs).swap(*this);
+      return *this;
+  }
+  void reset() {
+    Ten().swap(*this);
+  }
+  void reset(TenImpl * rhs) {
+    Ten(rhs, true).swap(*this);
+  }
+  void reset(TenImpl * rhs, bool retain) {
+    Ten(rhs, retain).swap(*this );
+  }
+  void swap(Ten & rhs) {
+    TenImpl * tmp = pImpl;
+    pImpl = rhs.pImpl;
+    rhs.pImpl = tmp;
+  }
+  TenImpl * get() const {
+    return pImpl;
+  }
+  TenImpl * detach() {
+    TenImpl * ret = pImpl;
+    pImpl = nullptr;
+    return ret;
+  }
+  float* data() const {
+    return pImpl->data;
+  }
+
+  bool defined() const {
+    return pImpl;
+  }
+  Ten operator+(const Ten& b) const {
+    auto fn = (decltype(&plus_f))(this->pImpl->vtable[ADD]);
+    return fn(*this, b);
+  }
+  Ten operator*(const Ten& b) const {
+    auto fn = (decltype(&mul_f))(this->pImpl->vtable[MUL]);
+    return fn(*this, b);
+  }
+  Ten mm(const Ten& b) const {
+    auto fn = (decltype(&mm_f))(this->pImpl->vtable[MM]);
+    return fn(*this, b);
+  }
+  Ten sigmoid() const {
+    auto fn = (decltype(&sigmoid_f))(this->pImpl->vtable[SIGMOID]);
+    return fn(*this);
+  }
+  Ten tanh() const {
+    auto fn = (decltype(&tanh_f))(this->pImpl->vtable[TANH]);
+    return fn(*this);
+  }
+  std::vector<Ten> chunk4() {
+    auto fn = (decltype(&chunk4_f))(this->pImpl->vtable[CHUNK]);
+    return fn(*this);
+  }
+  at::ArrayRef<int64_t> sizes() const {
+    return ArrayRef<int64_t>(pImpl->sizes, 2);
+  }
+public:
+  TenImpl * pImpl;
+};
+
+static void** the_vtable = nullptr;
+
+Ten create(at::ArrayRef<int64_t> sizes) {
+  auto r = Ten(new TenImpl, false);
+  r.pImpl->vtable = the_vtable;
+  r.pImpl->sizes[0] = sizes[0];
+  r.pImpl->sizes[1] = sizes[1];
+  r.pImpl->data = new float[sizes[0]*sizes[1]];
+  return r;
+}
+
+Ten plus_f(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] + b_data[i];
+  }
+  return c;
+}
+
+Ten mul_f(const Ten& a, const Ten& b) {
+  JIT_ASSERT(a.sizes().equals(b.sizes()));
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i] * b_data[i];
+  }
+  return c;
+}
+
+Ten sigmoid_f(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = 1.f / (1.f + expf(-a_data[i]));
+  }
+  return c;
+}
+
+Ten tanh_f(const Ten& a) {
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = tanhf(a_data[i]);
+  }
+  return c;
+}
+
+Ten mm_f(const Ten& a, const Ten& b) {
+  auto M = a.sizes()[0];
+  auto K = a.sizes()[1];
+  JIT_ASSERT(K == b.sizes()[0]);
+  auto N = b.sizes()[1];
+  auto c = create({M, N});
+  auto a_data = a.data();
+  auto b_data = b.data();
+  auto c_data = c.data();
+
+  for(int64_t m = 0; m < M; m++) {
+    for(int64_t n = 0; n < N; n++) {
+      float s = 0;
+      for(int64_t k = 0; k < K; k++) {
+        s += a_data[m*K + k] * b_data[k*N + n];
+      }
+      c_data[m*N + n] = s;
+    }
+  }
+  return c;
+}
+
+std::vector<Ten> chunk4_f(const Ten& a) {
+  JIT_ASSERT(a.sizes()[1] % 4 == 0);
+  auto B = a.sizes()[0];
+  auto M = a.sizes()[1];
+  auto N = M / 4;
+  std::vector<Ten> result = { create({B, N}), create({B, N}), create({B, N}), create({B, N}) };
+  auto a_data = a.data();
+  for(int64_t b = 0; b < B; b++) {
+    for(int64_t i = 0; i < 4; i++) {
+      for(int64_t n = 0; n < N; n++) {
+        result[i].data()[b*N + n] = a_data[b*M + i*N + n];
+      }
+    }
+  }
+  return result;
+}
+
+Ten load(const at::Tensor& a) {
+  JIT_ASSERT(a.is_contiguous());
+  auto c = create(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data<float>();
+  auto c_data = c.data();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+
+at::Tensor save(const Ten& a) {
+  auto c = at::CPU(at::kFloat).tensor(a.sizes());
+  auto sizes = a.sizes();
+  auto a_data = a.data();
+  auto c_data = c.data<float>();
+  int64_t N = sizes[0]*sizes[1];
+  for(int64_t i = 0; i < N; i++) {
+    c_data[i] = a_data[i];
+  }
+  return c;
+}
+
+std::pair<Ten, Ten>
+lstm_t(Ten input,
+      Ten hx,
+      Ten cx,
+      Ten w_ih,
+      Ten w_hh) {
+  auto gates = input.mm(w_ih) + hx.mm(w_hh);
+
+  auto chunked_gates = gates.chunk4();
+  auto ingate     = chunked_gates[0];
+  auto forgetgate = chunked_gates[1];
+  auto cellgate = chunked_gates[2];
+  auto outgate    = chunked_gates[3];
+
+  ingate = ingate.sigmoid();
+  outgate = outgate.sigmoid();
+  cellgate = cellgate.tanh();
+  forgetgate = forgetgate.sigmoid();
+
+  auto cy = (forgetgate * cx) + (ingate * cellgate);
+  auto hy = outgate * cy.tanh();
+
+  return {hy, cy};
+}
+
+void doit() {
+  the_vtable = new void*[401];
+  the_vtable[ADD] = (void*)&plus_f;
+  the_vtable[MUL] = (void*)&mul_f;
+  the_vtable[SIGMOID] = (void*)&sigmoid_f;
+  the_vtable[TANH] = (void*)&tanh_f;
+  the_vtable[MM] = (void*)&mm_f;
+  the_vtable[CHUNK] = (void*)&chunk4_f;
+
+  constexpr int batch_size = 1;
+  constexpr int input_size = 1;
+
+  int hidden_size = 1;
+
+  auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
+  auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto cx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
+  auto w_ih  = at::randn(at::CPU(at::kFloat), {input_size, 4 * hidden_size});
+  auto w_hh  = at::randn(at::CPU(at::kFloat), {hidden_size, 4 * hidden_size});
+
+  auto r0 = torch::jit::lstm(input, hx, cx, w_ih, w_hh);
+
+  auto input_t = load(input);
+  auto hx_t    = load(hx);
+  auto cx_t    = load(cx);
+  auto w_ih_t  = load(w_ih);
+  auto w_hh_t  = load(w_hh);
+
+  auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+
+  auto r0_0 = r0.first;
+  auto r0_1 = r0.second;
+  auto r1_0 = save(r1.first);
+  auto r1_1 = save(r1.second);
+
+  JIT_ASSERT(torch::jit::almostEqual(r0_0, r1_0));
+  JIT_ASSERT(torch::jit::almostEqual(r0_1, r1_1));
+  auto start = getTime();
+  size_t i;
+  constexpr auto repeat = 100;
+  for(i = 0; (getTime() - start) < 1000ULL*1000ULL*100ULL; ++i) {
+    for(int j = 0; j < repeat; j++) {
+      auto r1 = lstm_t(input_t, hx_t, cx_t, w_ih_t, w_hh_t);
+    }
+  }
+
+  std::cout << "custom_vtable " << (getTime() - start)/ (double)(i*repeat) << "\n";
+}
+
+}
+
+
 
 std::string runJITCPPTests() {
   std::stringstream out;
-  doit();
+  cpu_pin(16);
+  check_cpu_governor(16);
+  for(int i = 0; i < 100; i++) {
+    direct::doit();
+    vtable::doit();
+    custom_vtable::doit();
+  }
   std::cout << "DONE\n";
   testControlFlow();
   testGraphExecutor();
