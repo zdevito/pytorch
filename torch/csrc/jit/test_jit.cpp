@@ -12,11 +12,13 @@
 #include <sched.h>
 #include <errno.h>
 
+/*
 inline uint64_t getTime() {
   using namespace std::chrono;
   using clock = std::conditional<high_resolution_clock::is_steady, high_resolution_clock, steady_clock>::type;
   return duration_cast<nanoseconds>(clock::now().time_since_epoch()).count();
 }
+*/
 
 /**
  * cpu_pin - pin down the local thread to a core
@@ -103,6 +105,16 @@ void check_cpu_governor(unsigned int cpu)
 
 #include <vector>
 #include <iostream>
+
+uint64_t MakeTime(struct timespec const& ts) {
+  return ts.tv_sec*1000000000LL + ts.tv_nsec;
+}
+
+inline uint64_t getTime() {
+  struct timespec ts;
+  JIT_ASSERT(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0);
+  return MakeTime(ts);
+}
 
 #ifndef NO_PYTHON
 #include "torch/csrc/utils/auto_gil.h"
@@ -379,7 +391,7 @@ bool checkRtol(const at::Tensor& diff, const std::vector<at::Tensor> inputs) {
   for (auto& tensor : inputs) {
     maxValue = fmax(tensor.abs().max().toCFloat(), maxValue);
   }
-  return diff.abs().max().toCFloat() < 2e-6 * maxValue;
+  return diff.abs().max().toCFloat() < 2e-5 * maxValue;
 }
 bool almostEqual(const at::Tensor & a, const at::Tensor & b) {
   return checkRtol(a - b,{a, b});
@@ -993,7 +1005,24 @@ TEST_CASE( "jit test CUDA", "[cuda]" ) {
 #endif
 
 
+__attribute__((noinline))
+int flushCache(int foo) {
+  constexpr int _30meg = 30*1024*1024;
+  auto a = new char[_30meg];
+  for(int i = 0; i < _30meg; i++) {
+    a[i] = i*foo;
+  }
+  int r = a[rand() % _30meg];
+  delete [] a;
+  return r;
+}
+
 // mm, chunk, sigmoid, tanh, +, *
+
+constexpr int batch_size = 1;
+constexpr int input_size = 128;
+constexpr int hidden_size = 128;
+
 
 namespace direct {
 
@@ -1254,10 +1283,6 @@ lstm_t(Ten input,
 }
 
 void doit() {
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -2773,10 +2798,6 @@ lstm_t(Ten input,
 }
 
 void doit() {
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -3099,11 +3120,6 @@ void doit() {
   the_vtable[TANH] = (void*)&tanh_f;
   the_vtable[MM] = (void*)&mm_f;
   the_vtable[CHUNK] = (void*)&chunk4_f;
-
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -3452,12 +3468,6 @@ void doit() {
   dispatch_table[get_key({SIGMOID,cpu_float_tensor_key})] = (void*)sigmoid_f;
   dispatch_table[get_key({TANH,cpu_float_tensor_key})] = (void*)tanh_f;
   dispatch_table[get_key({CHUNK,cpu_float_tensor_key})] = (void*)chunk4_f;
-
-
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -3841,11 +3851,6 @@ void doit() {
   dispatch_table[HashKey(TANH,cpu_float_tensor_key)] = (void*)tanh_f;
   dispatch_table[HashKey(CHUNK,cpu_float_tensor_key)] = (void*)chunk4_f;
 
-
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -4270,10 +4275,6 @@ void doit() {
   JIT_ASSERT(lookup(HashKey(TANH, cpu_float_tensor_key)) == (void*)  tanh_f);
   JIT_ASSERT(lookup(HashKey(CHUNK, cpu_float_tensor_key)) == (void*)  chunk4_f);
 
-  constexpr int batch_size = 1;
-  constexpr int input_size = 1;
-
-  int hidden_size = 1;
 
   auto input = at::randn(at::CPU(at::kFloat), {batch_size, input_size});
   auto hx    = at::randn(at::CPU(at::kFloat), {batch_size, hidden_size});
@@ -4319,11 +4320,17 @@ std::string runJITCPPTests() {
   cpu_pin(16);
   check_cpu_governor(16);
   for(int i = 0; i < 100; i++) {
+    flushCache(1);
     direct::doit();
+    flushCache(1);
     vtable::doit();
+    flushCache(1);
     custom_vtable::doit();
+    flushCache(1);
     slowhash::doit();
+    flushCache(1);
     consthash::doit();
+    flushCache(1);
     customhash::doit();
   }
   std::cout << "DONE\n";
