@@ -373,6 +373,36 @@ void fixDefaultLstmCellState(Block *b) {
   }
 }
 
+static bool isSafeToSpeculate(Node* n) {
+  return n->kind() == onnx::Transpose;
+}
+
+static void speculateOps(Block* block) {
+  for(auto it = block->nodes().begin(), end = block->nodes().end();
+      it != end;) {
+    Node * n = *it;
+    ++it; //note: increment first so that it is safe to move the node if needed
+
+    for(auto b : n->blocks()) {
+      speculateOps(b);
+    }
+    if(!isSafeToSpeculate(n))
+      continue;
+    // XXX - only works for nodes with a single input
+    // move node n outside of the control flow it is nested in
+    auto node_input = n->input()->node();
+    if(node_input->owningBlock() == n->owningBlock())
+      continue;
+    // find the control flow node in the same block as node_input that contains
+    // Node n
+    auto flow_node = n->owningBlock()->owningNode();
+    while(flow_node->owningBlock() != node_input->owningBlock())
+      flow_node = flow_node->owningBlock()->owningNode();
+    // put the node right before this flow node
+    n->moveBefore(flow_node);
+  }
+}
+
 // This optimization does ONNX-specific peephole optimizations.
 //
 // At the moment, here are the optimizations it does:
@@ -402,6 +432,7 @@ void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph) {
   fuseConsecutiveTransposes(graph->block());
   eliminateNopTranspose(graph->block());
   fuseTransposeIntoGemm(graph->block());
+  speculateOps(graph->block());
 }
 
 }}

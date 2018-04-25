@@ -2808,6 +2808,22 @@ class TestScript(TestCase):
         self.assertExpected(torch.onnx._export_to_pretty_string(
             mte, (torch.ones(2, 3),), None, verbose=False))
 
+    def test_onnx_export_speculate(self):
+        class Foo(torch.jit.ScriptModule):
+            @torch.jit.script_method
+            def forward(self, x):
+                x += x
+                if True:
+                    y = x.t()
+                else:
+                    y = x.t()
+                return y
+        onnx_ish = torch.onnx._export_to_pretty_string(
+            Foo(),
+            (torch.ones(2, 1, dtype=torch.float), ),
+            None, verbose=False)
+        self.assertExpected(onnx_ish)
+
 
 # Smoke tests for export methods
 class TestPytorchExportModes(unittest.TestCase):
