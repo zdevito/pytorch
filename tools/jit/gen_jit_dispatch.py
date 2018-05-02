@@ -6,9 +6,9 @@ from ..autograd.gen_autograd import load_aten_declarations
 
 template_path = os.path.join(os.path.dirname(__file__), 'templates')
 
-ATEN_DISPATCH_H = CodeTemplate.from_file(template_path + '/aten_dispatch.h')
 ATEN_DISPATCH_CPP = CodeTemplate.from_file(template_path + '/aten_dispatch.cpp')
 ATEN_INTERNED_STRINGS_H = CodeTemplate.from_file(template_path + '/aten_interned_strings.h')
+ATEN_SCHEMA_CPP = CodeTemplate.from_file(template_path + '/aten_schema.cpp')
 
 ATTR_METHOD_MAP = {
     'int64_t': 'i',
@@ -60,6 +60,21 @@ CONSTRUCTOR = CodeTemplate("""\
     return 0;
   }, "${name}", ${num_dynamic_inputs}, ${num_outputs});
 }},
+""")
+
+OPERATOR_SCHEMA = CodeTemplate("""\
+__attribute__((noinline))
+static void push${i}(std::vector<OperatorSchema>& schemas) {
+    schemas.push_back({"${name}", {
+        ${arguments}
+      }, {
+        ${returns}
+      }
+    });
+}
+""")
+ARGUMENT_SCHEMA = CodeTemplate("""\
+{"${name}", ${default_value}, ${attribute_kind}, ${is_list}},
 """)
 
 
@@ -241,13 +256,43 @@ def gen_jit_dispatch(declarations, out):
     aten_decls = load_aten_declarations(declarations) + tensor_impl_methods
     jit_decls = [d for d in aten_decls if is_jit_op(d)]
 
+    s = set()
+    for decl in jit_decls:
+        for arg in decl['returns']:
+            s.add(arg.get('type'))
+
+        for arg in decl['arguments']:
+            s.add(arg.get('simple_type'))
+    print("HIHIHI")
+    print(s)
+
+    schemas = []
+
+    def emit_schema(i, decl):
+        def format_argument(arg):
+            return ARGUMENT_SCHEMA.substitute(
+                name=arg['name'],
+                default_value="at::nullopt",
+                attribute_kind='at::nullopt',
+                is_list='true' if arg.get('type') == 'TensorList' else 'false')
+
+        return OPERATOR_SCHEMA.substitute(
+            i=i,
+            name=decl['name'],
+            arguments=[format_argument(a) for a in decl['arguments']],
+            returns=[format_argument(a) for a in decl['returns']])
+
     for decl in jit_decls:
         emit_decl(decl)
 
     # Sort the generated snippets to ensure that the generation is deterministic
-    env = {'constructors': sorted(ops.values())}
-    write(out, 'aten_dispatch.h', ATEN_DISPATCH_H, env)
+    env = {
+        'constructors': sorted(ops.values()),
+        'schemas': [emit_schema(i, decl) for i, decl in enumerate(jit_decls)],
+        'schemas_push_back': ['push{}(schemas);'.format(i) for i in range(len(jit_decls))]
+    }
     write(out, 'aten_dispatch.cpp', ATEN_DISPATCH_CPP, env)
+    write(out, 'aten_schema.cpp', ATEN_SCHEMA_CPP, env)
 
     # NB: Operate on aten_decls, not jit_decls, because VariableType is
     # a client for these symbols as well
