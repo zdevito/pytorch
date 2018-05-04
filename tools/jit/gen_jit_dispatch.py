@@ -3,6 +3,7 @@ import argparse
 from itertools import count, combinations
 from ..autograd.utils import CodeTemplate, write, uninplace_api_name
 from ..autograd.gen_autograd import load_aten_declarations
+from collections import OrderedDict
 
 template_path = os.path.join(os.path.dirname(__file__), 'templates')
 
@@ -62,27 +63,20 @@ CONSTRUCTOR = CodeTemplate("""\
 }},
 """)
 
-OPERATOR_SCHEMA = CodeTemplate("""\
-__attribute__((noinline))
-static void push${i}(std::vector<OperatorSchema>& schemas) {
-    schemas.push_back({"${name}", {
-        ${arguments}
-      }, {
-        ${returns}
-      }
-    });
-}
-""")
-ARGUMENT_SCHEMA = CodeTemplate("""\
-{"${name}", ${default_value}, ${attribute_kind}, ${is_list}},
-""")
-
 
 def is_magic_method(api_name):
     return api_name.startswith('__') and api_name.endswith('__')
 
 
 def is_jit_op(decl):
+    # we currently only support vararg tensor lists when they are the _first_ argument
+    # and the only tensor argument
+    arguments = decl['arguments']
+    has_tensorlist = any(arg['simple_type'] == 'TensorList' for arg in arguments)
+    num_tensor_args = sum(map(is_tensor_arg, arguments))
+    if has_tensorlist and (num_tensor_args != 1 or arguments[0]['simple_type'] != 'TensorList'):
+        return False
+
     uses_tensors = any(arg['simple_type'] in {'Tensor', 'TensorList'} for arg in decl['arguments']) or \
         'Tensor' in decl['method_of']
     return ((not decl['api_name'].endswith('_') or is_magic_method(decl['api_name'])) and
@@ -107,11 +101,12 @@ skip_scalar_overload = {
 }
 
 
+def is_tensor_arg(arg):
+    return arg['simple_type'] in {'Tensor', 'TensorList'}
+
+
 def gen_jit_dispatch(declarations, out):
     ops = {}
-
-    def is_tensor_arg(arg):
-        return arg['simple_type'] in {'Tensor', 'TensorList'}
 
     def is_sized_intlist_arg(arg):
         """Returns True for arguments declared as IntList[k], but False for IntList."""
@@ -197,12 +192,6 @@ def gen_jit_dispatch(declarations, out):
         all_scalars = all(r['dynamic_type'] != 'TensorList' for r in returns)
         num_outputs = str(len(returns)) if all_scalars else 'UNKNOWN_OUTPUTS'
 
-        # special case for chunk when the chunks=<const> is known
-        # DO NOT ADD MORE SPECIAL CASES HERE, REFACTOR INTO A FUNCTION IF
-        # NEEDED
-        if decl['name'] == 'chunk' and 'chunks_i' in attr_names:
-            num_outputs = 'node->i(Symbol::attr("chunks"))'
-
         constructor = CONSTRUCTOR.substitute(descriptor=descriptor, name=decl['name'],
                                              call=call,
                                              kw_assignments=kw_assignments,
@@ -217,11 +206,6 @@ def gen_jit_dispatch(declarations, out):
         arguments = decl['arguments']
         has_tensorlist = any(arg['simple_type'] == 'TensorList' for arg in arguments)
         num_tensor_args = sum(map(is_tensor_arg, arguments))
-
-        # we currently only support vararg tensor lists when they are the _first_ argument
-        # and the only tensor argument
-        if has_tensorlist and (num_tensor_args != 1 or arguments[0]['simple_type'] != 'TensorList'):
-            return
 
         # Right now, we generate dispatch methods that either take all non-tensor arguments
         # as attributes, or don't use any attributes at all. In the future we might want to
@@ -254,33 +238,7 @@ def gen_jit_dispatch(declarations, out):
         'returns': [{'name': 'result', 'type': 'int64_t', 'dynamic_type': 'int64_t'}],
     } for name in ['sizes', 'strides', 'dim']]
     aten_decls = load_aten_declarations(declarations) + tensor_impl_methods
-    jit_decls = [d for d in aten_decls if is_jit_op(d)]
-
-    s = set()
-    for decl in jit_decls:
-        for arg in decl['returns']:
-            s.add(arg.get('type'))
-
-        for arg in decl['arguments']:
-            s.add(arg.get('simple_type'))
-    print("HIHIHI")
-    print(s)
-
-    schemas = []
-
-    def emit_schema(i, decl):
-        def format_argument(arg):
-            return ARGUMENT_SCHEMA.substitute(
-                name=arg['name'],
-                default_value="at::nullopt",
-                attribute_kind='at::nullopt',
-                is_list='true' if arg.get('type') == 'TensorList' else 'false')
-
-        return OPERATOR_SCHEMA.substitute(
-            i=i,
-            name=decl['name'],
-            arguments=[format_argument(a) for a in decl['arguments']],
-            returns=[format_argument(a) for a in decl['returns']])
+    jit_decls = tuple(d for d in aten_decls if is_jit_op(d))
 
     for decl in jit_decls:
         emit_decl(decl)
@@ -288,11 +246,10 @@ def gen_jit_dispatch(declarations, out):
     # Sort the generated snippets to ensure that the generation is deterministic
     env = {
         'constructors': sorted(ops.values()),
-        'schemas': [emit_schema(i, decl) for i, decl in enumerate(jit_decls)],
-        'schemas_push_back': ['push{}(schemas);'.format(i) for i in range(len(jit_decls))]
     }
     write(out, 'aten_dispatch.cpp', ATEN_DISPATCH_CPP, env)
-    write(out, 'aten_schema.cpp', ATEN_SCHEMA_CPP, env)
+
+    emit_schema(jit_decls, out)
 
     # NB: Operate on aten_decls, not jit_decls, because VariableType is
     # a client for these symbols as well
@@ -311,6 +268,69 @@ def gen_jit_dispatch(declarations, out):
         'attr_symbols': ["_(attr, {}) \\".format(n) for n in sorted(attrs)]
     }
     write(out, 'aten_interned_strings.h', ATEN_INTERNED_STRINGS_H, strings_env)
+
+
+def emit_schema(jit_decls, out):
+    names = OrderedDict()
+    tensors = OrderedDict()
+    attributes = OrderedDict()
+
+    env = {
+        'arguments': [],
+        'operators': [],
+        'n_operators': len(jit_decls),
+    }
+
+    def interned(d, v):
+        v = v + ", "
+        if v not in d:
+            d[v] = len(d)
+        return d[v]
+
+    def get_name(name):
+        return interned(names, '"{}"'.format(name))
+
+    def emit_arg(arg, is_return):
+        n = get_name(arg['name'])
+        tensor = 'at::nullopt'
+        attribute = 'at::nullopt'
+        if not is_return:
+            if is_tensor_arg(arg):
+                if 'default' in arg and arg['default'] == '{}':
+                    tensor = 'at::Tensor()'
+            else:
+                attribute = 'AttributeKind::{}'.format(ATTR_METHOD_MAP[arg['simple_type']])
+                if 'default' in arg:
+                    value = arg['default']
+                    # conversion in yaml turns string 'true' into python bool
+                    # we need it to turn into
+                    value = str(value).lower() if type(value) == bool else value
+                    tensor = 'as_tensor({}({}))'.format(arg['simple_type'], value)
+        d = interned(tensors, tensor)
+        a = interned(attributes, attribute)
+        is_list = '1' if arg.get('type') == 'TensorList' else '0'
+        comment = '//Argument("{}", {}, {}, {})'.format(arg['name'], tensor, attribute, is_list)
+        env['arguments'].append("{{ {}, {}, {}, {} }}, {} ".format(n, d, a, is_list, comment))
+
+    def emit(decl):
+        n = get_name(decl['name'])
+        for a in decl['arguments']:
+            emit_arg(a, False)
+        for a in decl['returns']:
+            emit_arg(a, True)
+        n_args = len(decl['arguments'])
+        n_returns = len(decl['returns'])
+        env['operators'].append('{{ {}, {}, {} }}, // OperatorSchema("{}", <{} arguments>, <{} returns>) '.format(
+            n, n_args, n_returns, decl['name'], n_args, n_returns))
+
+    for decl in jit_decls:
+        emit(decl)
+
+    env['names'] = names.keys()
+    env['tensors'] = tensors.keys()
+    env['attributes'] = attributes.keys()
+
+    write(out, 'aten_schema.cpp', ATEN_SCHEMA_CPP, env)
 
 
 def main():

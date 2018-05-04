@@ -35,8 +35,6 @@
 #include "torch/csrc/jit/script/compiler.h"
 #include "torch/csrc/jit/script/module.h"
 
-#include "torch/csrc/jit/aten_schema.h"
-
 #include <vector>
 #include <iostream>
 

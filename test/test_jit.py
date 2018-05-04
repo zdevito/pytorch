@@ -1656,7 +1656,7 @@ class TestScript(TestCase):
         x = torch.rand(10, dtype=torch.float, requires_grad=True)
         self.assertEqual(func(x), torch.cat((x, x), dim=0))
 
-        with self.assertRaisesRegex(RuntimeError, "expected 1 input"):
+        with self.assertRaisesRegex(RuntimeError, "expected at most"):
             @torch.jit.script
             def func(x):
                 return torch.cat((x, x), x, dim=0)
@@ -2419,7 +2419,7 @@ class TestScript(TestCase):
 
     def test_script_module_star_assign_fail_pythonop(self):
 
-        with self.assertRaisesRegex(RuntimeError, "value cannot be used as a tuple"):
+        with self.assertRaisesRegex(RuntimeError, "cannot be used as a tuple"):
             class M2(torch.jit.ScriptModule):
                 def __init__(self):
                     super(M2, self).__init__(True)
@@ -2437,7 +2437,7 @@ class TestScript(TestCase):
             m(torch.zeros(4, 3))
 
     def test_script_module_star_assign_fail_builtin(self):
-        with self.assertRaisesRegex(RuntimeError, "value cannot be used as a tuple"):
+        with self.assertRaisesRegex(RuntimeError, "cannot be used as a tuple"):
             class M2(torch.jit.ScriptModule):
                 def __init__(self):
                     super(M2, self).__init__(True)
@@ -2495,7 +2495,7 @@ class TestScript(TestCase):
         torch.onnx._export(m, (x, seq_lens), f, verbose=False)
 
     def test_script_outputs(self):
-        with self.assertRaisesRegex(RuntimeError, "value cannot be used as a tuple"):
+        with self.assertRaisesRegex(RuntimeError, "cannot be used as a tuple"):
             @torch.jit.script
             def foo(a):
                 c, d = a + a
@@ -2856,7 +2856,7 @@ class TestScript(TestCase):
 
         @torch.jit.script
         def foo(x, y):
-            return torch.index_select(x, y, dim=1)
+            return torch.index_select(x, index=y, dim=1)
 
         a = torch.zeros(2, 2)
         b = torch.zeros(4, dtype=torch.long)

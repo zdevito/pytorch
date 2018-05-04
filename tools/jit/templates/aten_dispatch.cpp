@@ -75,7 +75,7 @@ int deviceForInputs(Stack & stack, size_t N) {
 // A list of functions taking TensorList arguments (where we can't use
 // the number of inputs to choose an overload).
 std::unordered_set<Symbol> tensor_vararg_fns = {
-  aten::cat,
+  aten::cat, aten::stack,
 };
 
 template<size_t N>

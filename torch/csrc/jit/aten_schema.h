@@ -19,16 +19,65 @@ struct OperatorSchema {
   const std::vector<Argument> arguments;
   const std::vector<Argument> returns;
 
-  at::optional<Argument> argumentWithName(const std::string& name) {
-    auto it = std::find_if(arguments.begin(), arguments.end(), [&](const Argument& arg) {
-      return arg.name == name;
-    });
-    if(it == arguments.end())
-      return at::nullopt;
-    return *it;
+  at::optional<int> argumentIndexWithName(const std::string& name) const {
+    for(size_t i = 0; i < arguments.size(); ++i) {
+      if(name == arguments[i].name)
+        return i;
+    }
+    return at::nullopt;
   }
 };
 
+inline std::ostream& operator<<(std::ostream& out, const Argument& arg) {
+  if(arg.attribute_kind) {
+    switch(*arg.attribute_kind) {
+      case AttributeKind::i:
+        out << "int64_t ";
+        break;
+      case AttributeKind::is:
+        out << "IntList ";
+        break;
+      case AttributeKind::f:
+        out << "float ";
+        break;
+      default:
+        out << "Tensor ";
+    }
+  } else if(arg.is_list) {
+    out << "TensorList ";
+  } else {
+    out << "Tensor ";
+  }
+  out << arg.name;
+  if(arg.default_value) {
+    out << "=<default>";
+  }
+  return out;
+}
+
+inline std::ostream& operator<<(std::ostream& out, const OperatorSchema& schema) {
+  // eventually this should look almost identical to python arg parser, but
+  // it is simpler for now to work directly of this schema
+  auto emitList = [&](const std::vector<Argument>& args) {
+    out << "(";
+    for(size_t i = 0; i < args.size(); ++i) {
+      if(i > 0)
+        out << ", ";
+      out << args[i];
+    }
+    out << ")";
+  };
+
+  out << schema.name;
+  emitList(schema.arguments);
+  if(schema.returns.size() > 1) {
+    out << " -> ";
+    emitList(schema.returns);
+  }
+  return out;
+}
+
 const std::vector<OperatorSchema>& getOperatorSchema(const std::string& name);
+std::vector<OperatorSchema> & getOperatorSchemas();
 
 }}
