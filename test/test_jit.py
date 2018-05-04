@@ -1607,11 +1607,11 @@ class TestScript(TestCase):
     def test_keyword(self):
         @torch.jit.script
         def func(x):
-            return torch.sum(x, dim=0, keepdim=True)
+            return torch.sum(x, dim=0)
 
         x = torch.rand(10, dtype=torch.float, requires_grad=True)
         y = func(x)
-        y2 = torch.sum(x, dim=0, keepdim=True)
+        y2 = torch.sum(x, dim=0)
         self.assertEqual(y, y2)
 
     def test_literal(self):

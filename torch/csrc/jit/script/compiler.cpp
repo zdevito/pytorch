@@ -301,6 +301,7 @@ static bool isTensorTuple(Value* v) {
   return false;
 }
 
+
 // if a value is a constant then try to turn into type T using the
 // same rules as the interpreter
 template<typename T>
@@ -314,6 +315,61 @@ at::optional<T> constant_as(Value* v) {
     return at::nullopt;
   }
 }
+
+// try to turn constant inputs into attributes
+void liftConstantAttributes(const OperatorSchema& schema, Node* node) {
+  // we shouldn't start with attributes, just inputs
+  JIT_ASSERT(!node->hasAttributes());
+  std::vector<Value*> new_inputs;
+  Attributes<Node> attributes;
+  for(size_t i = 0; i < node->inputs().size(); ++i) {
+    const auto& arg = schema.arguments[i];
+    auto input = node->input(i);
+    if(arg.attribute_kind) {
+      switch(*arg.attribute_kind) {
+        case AttributeKind::i: {
+          auto r = constant_as<int64_t>(input);
+          if(!r)
+            return;
+          attributes.i_(Symbol::attr(arg.name), *r);
+        } break;
+        case AttributeKind::is: {
+          auto r = constant_as<at::IntList>(input);
+          if(!r)
+            return;
+          attributes.is_(Symbol::attr(arg.name), *r);
+        } break;
+        case AttributeKind::f: {
+          auto r = constant_as<double>(input);
+          if(!r)
+            return;
+          attributes.f_(Symbol::attr(arg.name), *r);
+        } break;
+        case AttributeKind::t: {
+          auto r = constant_as<at::Tensor>(input);
+          if(!r)
+            return;
+          attributes.t_(Symbol::attr(arg.name), *r);
+        } break;
+        default:
+          barf("AttributeKind not handled in LiftConstantAttributes file a bug report.");
+          return;
+      }
+    } else {
+      new_inputs.push_back(input);
+    }
+  }
+  // nothing changed no need to modify the node
+  if(!attributes.hasAttributes())
+    return;
+
+  node->removeAllInputs();
+  for(Value* input : new_inputs) {
+    node->addInput(input);
+  }
+  node->copyAttributes(attributes);
+}
+
 
 static std::shared_ptr<SugaredValue> tryEmitSchema(
   const OperatorSchema& schema,
@@ -426,6 +482,8 @@ static std::shared_ptr<SugaredValue> tryEmitSchema(
 
   for(size_t i = 0; i < num_outputs; ++i)
     n->addOutput();
+
+  liftConstantAttributes(schema, n);
 
   // assert that we did indeed create an op that has implementation
   // otherwise schema and dispatch are not in sync

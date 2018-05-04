@@ -40,6 +40,14 @@ struct tensor_as_impl<bool> {
   }
 };
 
+// this is an identity but is needed in constant_as in the compiler
+template<>
+struct tensor_as_impl<at::Tensor> {
+  at::Tensor operator()(at::Tensor&& t) {
+    return t;
+  }
+};
+
 template<size_t N>
 struct tensor_as_impl<std::array<bool, N>> {
   std::array<bool, N> operator()(at::Tensor&& t) {
