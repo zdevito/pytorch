@@ -605,8 +605,9 @@ struct to_ir {
       , def(def)
       , function_table(function_table)
       , resolver(resolver)
-      , environment_stack(nullptr) {
-    pushFrame(graph->block());
+      , environment_stack(std::make_shared<Environment>(method, resolver, graph->block())) {
+
+    environment_stack->setVar(def.range(), "$world", graph->entryWorld());
 
     std::vector<Argument> arguments, returns; // for schema
 
@@ -644,7 +645,7 @@ struct to_ir {
         returns.push_back({"", DynamicType::get(), at::nullopt, at::nullopt});
       }
     }
-
+    graph->setExitWorld(graph->currentWorld());
     method.setSchema({def.name().name(), std::move(arguments), std::move(returns)});
     // remove any uses of tuples that we inserted
     LowerTuples(graph);
@@ -662,11 +663,16 @@ private:
   std::shared_ptr<Environment> environment_stack;
 
   void pushFrame(Block * b) {
+    environment_stack->setVar(def.range(), "$world", graph->currentWorld());
     environment_stack = std::make_shared<Environment>(method, resolver, b, environment_stack);
+    graph->setCurrentWorld(environment_stack->getVar("$world", def.range()));
   }
   std::shared_ptr<Environment> popFrame() {
     auto old_frame = environment_stack;
+    // operations in the block may have changed the current world
+    old_frame->setVar(def.range(), "$world", graph->currentWorld());
     environment_stack = environment_stack->next;
+    graph->setCurrentWorld(environment_stack->getVar("$world", def.range()));
     return old_frame;
   }
   void emitStatements(const List<Stmt>& statements) {
@@ -723,44 +729,7 @@ private:
              ->create(kind, n_outputs)
              ->setSourceLocation(std::make_shared<SourceRange>(loc));
   }
-
-  Value* emitTernaryIf(const TernaryIf& expr) {
-    Value* cond_value = emitExpr(expr.cond());
-
-    Node* n = graph->insertNode(create(prim::If, expr.range(), 0));
-    n->addInput(cond_value);
-    auto* true_block = n->addBlock();
-    auto* false_block = n->addBlock();
-
-    auto emit_if_expr = [this](Block* b, const Expr& expr) {
-      pushFrame(b);
-      WithInsertPoint guard(b);
-      Value* out_val = emitExpr(expr);
-      b->registerOutput(out_val);
-      popFrame();
-    };
-
-    emit_if_expr(true_block, expr.true_expr());
-    emit_if_expr(false_block, expr.false_expr());
-
-    // Add op outputs
-    auto expr_value = n->addOutput(); // Resulting value
-
-    return expr_value;
-  }
-
-  void emitIf(const If& stmt) {
-    Value* cond_value = emitExpr(stmt.cond());
-
-    Node* n = graph->insertNode(create(prim::If, stmt.range(), 0));
-    n->addInput(cond_value);
-    auto* true_block = n->addBlock();
-    auto* false_block = n->addBlock();
-
-    // Emit both blocks once to get the union of all mutated values
-    auto save_true = emitSingleIfBranch(true_block, stmt.trueBranch());
-    auto save_false = emitSingleIfBranch(false_block, stmt.falseBranch());
-
+  void mergeIfEnvironments(const SourceRange& range, Node* n, std::shared_ptr<Environment> save_true, std::shared_ptr<Environment> save_false) {
     // In python, every variable assigned in an if statement escapes
     // the scope of the if statement (all variables are scoped to the function).
     // Script is a subset of python: we consider variables to be in scope
@@ -801,14 +770,65 @@ private:
 
     // Register outputs in each block
     for (const auto& x : mutated_variables) {
-      auto tv = save_true->getVar(x, stmt.range());
-      true_block->registerOutput(tv);
-      auto fv = save_false->getVar(x, stmt.range());
-      false_block->registerOutput(fv);
-      environment_stack->setVar(stmt.range(), x, n->addOutput()->setType(tv->type()));
+      auto tv = save_true->getVar(x, range);
+      auto fv = save_false->getVar(x, range);
+      Value* mv = tv;
+      if(tv != fv) {
+        save_true->block()->registerOutput(tv);
+        save_false->block()->registerOutput(fv);
+        mv = n->addOutput()->setType(tv->type());
+      }
+      environment_stack->setVar(range, x, mv);
     }
 
+    // if statement branches may have modified the world variable
+    graph->setCurrentWorld(environment_stack->getVar("$world", range));
   }
+
+  void emitIf(const If& stmt) {
+    Value* cond_value = emitExpr(stmt.cond());
+
+    Node* n = graph->insertNode(create(prim::If, stmt.range(), 0));
+    n->addInput(cond_value);
+    auto* true_block = n->addBlock();
+    auto* false_block = n->addBlock();
+
+    // Emit both blocks once to get the union of all mutated values
+    auto save_true = emitSingleIfBranch(true_block, stmt.trueBranch());
+    auto save_false = emitSingleIfBranch(false_block, stmt.falseBranch());
+
+    mergeIfEnvironments(stmt.range(), n, save_true, save_false);
+
+  }
+
+  Value* emitTernaryIf(const TernaryIf& expr) {
+    Value* cond_value = emitExpr(expr.cond());
+
+    Node* n = graph->insertNode(create(prim::If, expr.range(), 0));
+    n->addInput(cond_value);
+    auto* true_block = n->addBlock();
+    auto* false_block = n->addBlock();
+
+    auto emit_if_expr = [this](Block* b, const Expr& expr) {
+      pushFrame(b);
+      WithInsertPoint guard(b);
+      Value* out_val = emitExpr(expr);
+      b->registerOutput(out_val);
+      return popFrame();
+    };
+
+    auto true_frame = emit_if_expr(true_block, expr.true_expr());
+    auto false_frame = emit_if_expr(false_block, expr.false_expr());
+
+    // Add op outputs
+    auto expr_value = n->addOutput(); // Resulting value
+
+    // handle the possible change to $world inside an expression
+    mergeIfEnvironments(expr.range(), n, true_frame, false_frame);
+
+    return expr_value;
+  }
+
 
   // *********************** Loop Operators ************************************
   // Emits a loop operators conforming to the semantics specified at
@@ -896,6 +916,8 @@ private:
         outer_frame->setVar(range, x, n->addOutput()->setType(typ));
       }
 
+      // loop may have change $world
+      graph->setCurrentWorld(environment_stack->getVar("$world", range));
     }
   }
 
@@ -1160,7 +1182,7 @@ private:
       if (!attributes.empty())
         throw ErrorReport(ident) << "print doesn't accept any keyword arguments";
       ensureTensors(ident.range(), toValues(inputs));
-      emitNode(prim::Print, ident.range(), toValues(inputs), 0);
+      emitNode(prim::Print, ident.range(), toValues(inputs), 0)->addWorldToken();
       return std::make_shared<NoneValue>();
     }
     if(auto result = emitBuiltinCall(ident.range(), method, ident.name(), inputs, attributes, false)) {
@@ -1413,10 +1435,12 @@ std::shared_ptr<SugaredValue> SimpleValue::attr(SourceRange loc, Method & m, con
 std::vector<Value*> inlineCallTo(Graph& g, Graph& callee, ArrayRef<Value*> inputs) {
   std::unordered_map<Value*, Value*> value_map;
   auto value_map_func = [&](Value* v) { return value_map.at(v); };
+  value_map[callee.entryWorld()] = g.currentWorld();
   JIT_ASSERT(callee.inputs().size() == inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
     value_map[callee.inputs()[i]] = inputs[i];
   }
+
   for (auto* node : callee.nodes()) {
     auto* new_node =
         g.insertNode(g.createClone(node, value_map_func));
@@ -1429,6 +1453,7 @@ std::vector<Value*> inlineCallTo(Graph& g, Graph& callee, ArrayRef<Value*> input
   for (auto* output : callee.outputs()) {
     outputs.push_back(value_map_func(output));
   }
+  g.setCurrentWorld(value_map_func(callee.exitWorld()));
   return outputs;
 }
 

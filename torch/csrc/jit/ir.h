@@ -490,6 +490,11 @@ public:
 
   void eraseOutput(size_t i);
 
+  // insert the current world token as the first input to this operator,
+  // introduce a new world token as the output of this operator
+  // and set the current world token to the new output
+  Node* addWorldToken();
+
   Block * addBlock();
   void eraseBlock(size_t i);
 
@@ -628,6 +633,11 @@ public:
   // Result: %3 = g(%1)
   void destroy();
 
+  // equivalent to
+  // if(this == *it) it.destroyCurrent() else this->destroy()
+  // ensures 'it' remains valid after destroy
+  void destroy(graph_node_list_iterator& it);
+
   // Dynamically cast this node to the subclass indicated by the
   // template variable, returning nullptr if the cast is invalid..
   //
@@ -705,6 +715,10 @@ protected:
   // if you are going to preserve it.
   virtual void cloneFrom(Node * s);
 };
+
+static inline Value* value_not_found(Value* v) {
+  throw std::runtime_error("value not in map");
+}
 
 struct Block {
   friend struct Node;
@@ -787,7 +801,11 @@ struct Block {
   // to the inputs, nodes, and outputs of this block
   // value_map is used whenever a node in src references a free variable
   // in src to look up its corresponding value
-  void cloneFrom(Block * src, std::function<Value*(Value*)> value_map);
+  void cloneFrom(Block * src, std::unordered_map<Value*, Value*>& value_map, std::function<Value*(Value*)> value_callback=value_not_found);
+  void cloneFrom(Block * src, std::function<Value*(Value*)> value_callback) {
+    std::unordered_map<Value*, Value*> local_map;
+    return cloneFrom(src, local_map, value_callback);
+  }
 private:
   // should only be called in the constructor
   Node* initOutput(Node* p) {
@@ -840,15 +858,30 @@ private:
   // by default this is set to append to the top level block
   Node* insert_before_;
 
+  // see [World Token]
+  // single output is the source of the World token, is not a member of any block
+  Node* entry_world_;
+  // single input is the value of the World token on exit from this Graph
+  Node* exit_world_;
+  // current World token is used when creating new nodes that need it,
+  // similar to insert_before_, WithInsertPoint is a resource guard that handles it
+  Value* current_world_;
+
 public:
 
   Graph(std::shared_ptr<Scope> scope_root)
-  : next_unique_(0)
+  : next_unique_(std::numeric_limits<size_t>::max())
   , new_node_stage_(0)
   , scope_root_(scope_root)
   , current_scope_(scope_root_.get())
   , block_(new Block(this, nullptr))
-  , insert_before_(return_node()) {}
+  , insert_before_(return_node())
+  , entry_world_(create(prim::World))
+  , exit_world_(create(prim::World, 0))
+  , current_world_(entry_world_->output()) {
+    entry_world_->output()->setUniqueName("World");
+    exit_world_->addInput(entry_world_->output());
+  }
 
   Graph()
   : Graph( std::make_shared<Scope>()) {}
@@ -985,22 +1018,30 @@ public:
   // use node_map to translate inputs of n to inputs of the cloned node
   // if copy_blocks is false, it will not recursively clone the nested blocks
   // this node contains.
-  Node * createClone(Node * n, std::function<Value*(Value*)> value_map, bool copy_blocks=true) {
+
+  Node * createClone(Node * n, std::unordered_map<Value*, Value*>& map, std::function<Value*(Value*)> value_callback=value_not_found, bool copy_blocks=true) {
     //n can be from a different graph
     Node * r = n->allocNewInstance(this);
     for(auto o : n->outputs()) {
-      r->addOutput()->copyMetadata(o);
+      auto no = r->addOutput()->copyMetadata(o);
+      map[o] = no;
     }
     r->cloneFrom(n);
     for(auto i : n->inputs()) {
-      r->addInput(value_map(i));
+      auto it = map.find(i);
+      r->addInput(it != map.end() ? it->second : value_callback(i));
     }
     if(copy_blocks) {
       for(auto b : n->blocks()) {
-        r->addBlock()->cloneFrom(b, value_map);
+        r->addBlock()->cloneFrom(b, map, value_callback);
       }
     }
     return r;
+  }
+
+  Node*  createClone(Node* n, std::function<Value*(Value*)> value_callback=value_not_found, bool copy_blocks=true) {
+    std::unordered_map<Value*, Value*> local_map;
+    return createClone(n, local_map, value_callback, copy_blocks);
   }
 
   Node * appendNode(Node * n) {
@@ -1061,6 +1102,23 @@ public:
     return oss.str();
   }
 
+  Value* entryWorld() const {
+    return entry_world_->output();
+  }
+  Value* currentWorld() const {
+    return current_world_;
+  }
+  Value* exitWorld() const {
+    return exit_world_->input();
+  }
+  void setExitWorld(Value* v) {
+    exit_world_->replaceInput(0, v);
+  }
+  void setCurrentWorld(Value* v) {
+    JIT_ASSERT(v->owningGraph() == this);
+    current_world_ = v;
+  }
+
   friend std::ostream& operator<<(std::ostream & out, const Graph & g);
   std::shared_ptr<Graph> copy();
 
@@ -1088,17 +1146,25 @@ private:
 };
 
 struct WithInsertPoint : public ResourceGuard {
-  WithInsertPoint(Node * n)
+  WithInsertPoint(Node * n, Value* world=nullptr)
   : ResourceGuard([this] {
     prev->owningGraph()->setInsertPoint(prev);
+    if(prev_world)
+      prev->owningGraph()->setCurrentWorld(prev_world);
   })
-  , prev(n->owningGraph()->insertPoint()) {
+  , prev(n->owningGraph()->insertPoint())
+  , prev_world(nullptr) {
     n->owningGraph()->setInsertPoint(n);
+    if(world) {
+      prev_world = n->owningGraph()->currentWorld();
+      n->owningGraph()->setCurrentWorld(world);
+    }
   }
-  WithInsertPoint(Block * b)
-  : WithInsertPoint(b->return_node()) {}
+  WithInsertPoint(Block * b, Value* world=nullptr)
+  : WithInsertPoint(b->return_node(), world) {}
 private:
   Node * prev;
+  Value* prev_world;
 };
 
 struct WithCurrentScope : public ResourceGuard {
@@ -1164,6 +1230,13 @@ inline void Node::eraseOutput(size_t i) {
   }
 }
 
+inline Node* Node::addWorldToken() {
+  insertInput(0, owningGraph()->currentWorld());
+  auto new_world = insertOutput(0);
+  owningGraph()->setCurrentWorld(new_world);
+  return this;
+}
+
 inline Block * Node::addBlock() {
   blocks_.push_back(new Block(owningGraph(), this));
   return blocks_.back();
@@ -1185,6 +1258,14 @@ inline void Node::destroy() {
   if(inBlockList())
     removeFromList();
   graph_->freeNode(this);
+}
+
+inline void Node::destroy(graph_node_list_iterator& it) {
+  if(*it == this) {
+    it.destroyCurrent();
+  } else {
+    destroy();
+  }
 }
 
 inline void Node::cloneFrom(Node * s) {

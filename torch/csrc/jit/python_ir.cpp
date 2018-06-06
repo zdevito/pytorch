@@ -314,7 +314,7 @@ void initPythonIRBindings(PyObject * module_) {
     .NS(moveBefore)
     .NS(removeInput)
     .NS(removeAllInputs)
-    .NS(destroy)
+    .def("destroy", static_cast<void(Node::*)(void)>(&Node::destroy))
     .NS(hasUses)
     .NS(eraseOutput)
     .NS(addOutput)

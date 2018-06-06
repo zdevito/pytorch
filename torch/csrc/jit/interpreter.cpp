@@ -152,6 +152,12 @@ static std::vector<std::vector<TypePtr>> flattenStages(Graph & graph) {
   size_t input_pos = 0;
   size_t output_pos = 0;
   auto it = graph.nodes().begin();
+
+  if(graph.entryWorld()->uses().size() > 0) {
+    auto world_token = graph.create(prim::Undefined)->insertBefore(*it)->output();
+    graph.entryWorld()->replaceAllUsesWith(world_token);
+  }
+
   for(size_t i = 0; i <= graph.stage(); i++) {
     stage_input_types.emplace_back();
     auto store = graph.create(prim::Store, 0)->insertBefore(*it);
@@ -688,7 +694,8 @@ struct CodeImpl {
         return 0;
       };
     IR_ELSEIF(Print)
-      size_t num_inputs = value->inputs().size();
+       // first argument is world node, we leave it on the stack
+      size_t num_inputs = value->inputs().size() - 1;
       return [num_inputs](Stack & stack) {
         bool first = true;
         for (at::Tensor i : last(stack, num_inputs)) {

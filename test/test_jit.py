@@ -1453,6 +1453,22 @@ class TestScript(TestCase):
         y = torch.arange(0., 8, 2, requires_grad=True)
         self.checkScript(func, [x, y], optimize=True, capture_output=True)
 
+    def test_world(self):
+        def foo(x):
+            x = x + 1
+            print(x)
+            if x > 4:
+                if True:
+                    print(x + 1)
+            else:
+                x - 1
+            while x < 10:
+                print(x)
+                x += 1
+            return x
+        self.assertExpected(canonical(torch.jit.script(foo).graph))
+        self.checkScript(foo, [torch.zeros((), dtype=torch.long) + 2], capture_output=True)
+
     def test_multiple_assignment(self):
         def outer_func(x):
             return x * 2, x + 2

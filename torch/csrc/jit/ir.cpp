@@ -212,6 +212,11 @@ std::ostream& operator<<(std::ostream & out, const Node & n) {
 
 std::ostream& operator<<(std::ostream & out, const Graph & g) {
   out << "graph(" << const_value_list_with_types(g.inputs(), true) << ") {\n";
+  if(g.entryWorld() != g.exitWorld()) {
+    out << "  entryWorld = ";
+    printValueRef(out, g.entryWorld());
+    out << "\n";
+  }
   std::vector<const Node*> groups;
   size_t prev_stage = 0;
   for(auto n : g.nodes()) {
@@ -220,6 +225,11 @@ std::ostream& operator<<(std::ostream & out, const Graph & g) {
       prev_stage = n->stage();
     }
     printNode(out, 1, n, &groups);
+  }
+  if(g.entryWorld() != g.exitWorld()) {
+    out << "  exitWorld = ";
+    printValueRef(out, g.exitWorld());
+    out << "\n";
   }
   out << "  return (" << g.outputs() << ");\n}\n";
   size_t i = 0;
@@ -404,7 +414,7 @@ void Graph::lint() const {
       scope->insert(v);
       auto b2 = seen_uniques.insert(v->unique());
       JIT_ASSERT(b2.second);  // insertion took place
-      JIT_ASSERT(v->unique() < g.next_unique_);
+      JIT_ASSERT(v->unique() == std::numeric_limits<size_t>::max() || v->unique() < g.next_unique_);
 
       for (auto use : v->uses()) {
         JIT_ASSERT(!scope->contains(use.user));
@@ -472,7 +482,12 @@ void Graph::lint() const {
     void check_graph() {
       node_set all_nodes_set(ALL_OF(g.all_nodes)); // NB: all_nodes is *unordered*
 
+      sum_set.insert(g.entry_world_);
+      sum_set.insert(g.exit_world_);
+
+      check_value(g.entryWorld());
       check_block(g.block_);
+      check_node(g.exit_world_);
       for (auto kv : anticipated_uses) {
         JIT_ASSERT(kv.second == -1);
       }
@@ -484,6 +499,7 @@ void Graph::lint() const {
       }
       JIT_ASSERT(std::includes(ALL_OF(sum_set), ALL_OF(all_nodes_set)));
     }
+
   };
   LintImpl(*this).check_graph();
 }
@@ -496,8 +512,8 @@ void LintGraph(std::shared_ptr<Graph>& graph) {
   graph->lint();
 }
 
-void Block::cloneFrom(Block * src, std::function<Value*(Value*)> outer_map) {
-  std::unordered_map<Value*, Value*> local_map;
+void Block::cloneFrom(Block * src, std::unordered_map<Value*, Value*>& local_map, std::function<Value*(Value*)> outer_map) {
+
   auto env = [&](Value * v) {
     auto it = local_map.find(v);
     if(it != local_map.end())
@@ -511,14 +527,12 @@ void Block::cloneFrom(Block * src, std::function<Value*(Value*)> outer_map) {
     graph->setStage(std::max(graph->stage(), input->stage()));
   }
   for(auto node : src->nodes()) {
-    auto new_node = this->appendNode(graph->createClone(node, env));
+    auto new_node = this->appendNode(graph->createClone(node, local_map, env));
     new_node->setStage(node->stage());
     graph->setStage(std::max(graph->stage(), node->stage()));
     for(size_t i = 0; i < node->outputs().size(); ++i) {
       auto oo = node->outputs()[i];
       auto no = new_node->outputs()[i];
-      local_map[oo] = no;
-      no->copyMetadata(oo);
       no->setStage(oo->stage());
     }
   }
@@ -528,11 +542,14 @@ void Block::cloneFrom(Block * src, std::function<Value*(Value*)> outer_map) {
 }
 
 std::shared_ptr<Graph> Graph::copy() {
-  auto new_g = std::make_shared<Graph>();
+  auto new_g = std::make_shared<Graph>(scope_root());
   auto env = [](Value *) -> Value* {
     barf("Graph::copy() encountered a use of a value not in scope. Run lint!");
   };
-  new_g->block()->cloneFrom(this->block(), env);
+  std::unordered_map<Value*, Value*> map;
+  map[entryWorld()] = new_g->entryWorld();
+  new_g->block()->cloneFrom(this->block(), map, env);
+  new_g->setExitWorld(map[exitWorld()]);
   return new_g;
 }
 
