@@ -1204,7 +1204,7 @@ private:
 
   // any expression that can produce a SugaredValue is handled here
   // expressions that only return a single Value* are handled in emitSimpleExpr
-  std::shared_ptr<SugaredValue> emitSugaredExpr(Expr tree, size_t n_binders) {
+  std::shared_ptr<SugaredValue> emitSugaredExpr(Expr tree, size_t n_binders, bool bound_to_variable=false) {
     switch(tree.kind()) {
       case TK_VAR:
         return environment_stack->getSugaredVar(Var(tree).name());
@@ -1226,12 +1226,13 @@ private:
         return emitApplyExpr(apply.callee(), inputs, attributes, n_binders);
       } break;
       default:
-        return std::make_shared<SimpleValue>(emitSimpleExpr(tree));
+        return std::make_shared<SimpleValue>(emitSimpleExpr(tree, bound_to_variable));
     }
   }
 
   Value* emitSimpleExpr(
-      const TreeRef& tree) {
+      const TreeRef& tree,
+      bool bound_to_variable=false) {
     switch (tree->kind()) {
       case TK_NE:
       case TK_EQ:
@@ -1292,7 +1293,17 @@ private:
       case TK_LIST_LITERAL: {
         auto ll = ListLiteral(tree);
         auto values = getValues(ll.inputs(), /*maybe_unpack=*/true, identity);
-        return graph->insertNode(graph->createTuple(values))->output();
+        if(!bound_to_variable) {
+          return graph->insertNode(graph->createTuple(values))->output();
+        } else {
+          // XXX: right now we treat all expressions using lists as immutable tuples
+          // in the IR unless the constructor of the list is immediately bound to a
+          // variable. Supporting mutable lists that are not created this way
+          // will require list flattening passes similar to flatten tuple,
+          // and moving liftConstantAttributes out of the compiler into a pass
+          // that can run later.
+
+        }
       } break;
       default:
         throw ErrorReport(tree) << "NYI: " << tree;

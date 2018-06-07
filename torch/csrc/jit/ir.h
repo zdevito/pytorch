@@ -1009,6 +1009,11 @@ public:
     }
     return n;
   }
+  Node* createTensorList(at::ArrayRef<Value*> values) {
+    auto n = create(prim::ListConstruct, values);
+    n->output()->setType(ListType::ofTensors());
+    return n;
+  }
   Node* createPythonOp(
       THPObjectPtr&& pyobj,
       const std::string& cconv,
