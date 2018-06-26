@@ -21,9 +21,7 @@
 #include "torch/csrc/jit/graph_executor.h"
 #include "torch/csrc/jit/script/init.h"
 #include "torch/csrc/jit/script/python_tree_views.h"
-#include "torch/csrc/jit/python_interpreter.h"
 #include "torch/csrc/jit/pybind_utils.h"
-
 
 namespace torch  { namespace jit {
 
@@ -200,7 +198,6 @@ void initJITBindings(PyObject *module) {
   tracer::initPythonTracerBindings(module);
   script::initTreeViewBindings(module);
   script::initJitScriptBindings(module);
-  registerPythonInterpreterOps();
 }
 
 }}

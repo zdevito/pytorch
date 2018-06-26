@@ -1,7 +1,7 @@
 #include "torch/csrc/jit/script/module.h"
 #include "torch/csrc/jit/script/compiler.h"
 #include "torch/csrc/jit/script/error_report.h"
-#include "torch/csrc/jit/aten_schema.h"
+#include "torch/csrc/jit/operator.h"
 
 namespace torch { namespace jit { namespace script {
 
