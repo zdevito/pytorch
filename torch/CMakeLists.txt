@@ -212,6 +212,7 @@ set(TORCH_SRCS
   ${TORCH_SRC_DIR}/csrc/jit/operator.cpp
   ${TORCH_SRC_DIR}/csrc/jit/variable_flags.cpp
   ${TORCH_SRC_DIR}/csrc/jit/interpreter.cpp
+  ${TORCH_SRC_DIR}/csrc/jit/constants.cpp
   ${TORCH_SRC_DIR}/csrc/jit/register_prim_ops.cpp
   ${TORCH_SRC_DIR}/csrc/jit/ir.cpp
   ${TORCH_SRC_DIR}/csrc/jit/graph_executor.cpp

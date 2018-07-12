@@ -2,6 +2,7 @@
 
 #include "torch/csrc/jit/ir.h"
 #include "torch/csrc/jit/tracer_state.h"
+#include "torch/csrc/jit/constants.h"
 #include "torch/csrc/assertions.h"
 #include "torch/csrc/utils/functional.h"
 #include "torch/csrc/utils/variadic.h"
@@ -179,7 +180,7 @@ inline Value* getValueTrace(const std::shared_ptr<TracingState>& state, const Va
   auto vts = detail::getValueState(state, var, true);
   if (vts->trace) return vts->trace;
 
-  Value *constant = state->graph->appendNode(state->graph->createConstant(var.data()))->output();
+  Value *constant = createConstant(*state->graph, var.data());
   constant->inferTypeFrom(var.data());
   setValueTrace(state, var, constant);
   return constant;

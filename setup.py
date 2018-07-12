@@ -767,6 +767,7 @@ main_sources = [
     "torch/csrc/jit/passes/shape_analysis.cpp",
     "torch/csrc/jit/interned_strings.cpp",
     "torch/csrc/jit/type.cpp",
+    "torch/csrc/jit/constants.cpp",
     "torch/csrc/jit/export.cpp",
     "torch/csrc/jit/import.cpp",
     "torch/csrc/jit/autodiff.cpp",

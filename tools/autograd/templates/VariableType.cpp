@@ -11,6 +11,7 @@
 #include "torch/csrc/autograd/functions/tensor.h"
 #include "torch/csrc/autograd/functions/basic_ops.h"
 #include "torch/csrc/jit/tracer.h"
+#include "torch/csrc/jit/constants.h"
 #include "torch/csrc/jit/symbolic_variable.h"
 #include "torch/csrc/jit/tensor_conversions.h"
 #include "torch/csrc/utils/variadic.h"
@@ -52,7 +53,8 @@ static void setattr(jit::Node* n, jit::Symbol name, std::array<bool, N> v) { n->
 
 template<typename T>
 static jit::Value* createConstant(jit::Node* n, T value) {
-  return n->owningGraph()->createConstant(jit::as_tensor(value))->insertBefore(n)->output();
+  jit::WithInsertPoint guard(n);
+  return createConstant(*n->owningGraph(), jit::as_tensor(value));
 }
 
 template<typename T>
