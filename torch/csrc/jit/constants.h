@@ -13,8 +13,7 @@ namespace torch { namespace jit {
 Value* createConstant(
     Graph& g,
     IValue val,
-    at::optional<script::SourceRange> loc = at::nullopt,
-    TypePtr typ = nullptr);
+    at::optional<script::SourceRange> loc = at::nullopt);
 
 
 }}

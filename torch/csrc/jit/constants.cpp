@@ -6,11 +6,27 @@ namespace torch { namespace jit {
 Value* createConstant(
     Graph& g,
     IValue val,
-    at::optional<script::SourceRange> loc,
-    TypePtr typ) {
-  at::Tensor ref = std::move(val).toTensor();
-  JIT_ASSERT(ref.defined());
-  auto n = g.create(prim::Constant);
+    at::optional<script::SourceRange> loc) {
+
+  TypePtr typ = nullptr;
+  Node * n;
+  at::Tensor ref;
+  if(val.isTensor()) {
+    ref = std::move(val).toTensor();
+    JIT_ASSERT(ref.defined());
+  } else if(val.isInt()) { // eventually we will keep these as non-tensors
+    typ = IntType::get();
+    ref = at::full({}, val.toInt(), at::kLong);
+  } else if(val.isDouble()) {
+    typ = FloatType::get();
+    ref = at::full({}, val.toDouble(), at::kFloat);
+  } else if(val.isIntList()) {
+    typ = ListType::ofInts();
+    ref = as_tensor(val.toIntList()->elements());
+  } else {
+    throw std::runtime_error("Unsupported value kind: " + val.tagKind());
+  }
+  n = g.create(prim::Constant);
   n->t_(attr::value, ref.clone());
   n->output()->inferTypeFrom(ref);
   if(loc)

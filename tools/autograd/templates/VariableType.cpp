@@ -51,15 +51,13 @@ static void setattr(jit::Node* n, jit::Symbol name, std::string v)         { n->
 template<std::size_t N>
 static void setattr(jit::Node* n, jit::Symbol name, std::array<bool, N> v) { n->is_(name, std::vector<int64_t>(v.begin(), v.end())); }
 
-template<typename T>
-static jit::Value* createConstant(jit::Node* n, T value) {
+static jit::Value* createConstant(jit::Node* n, jit::IValue value) {
   jit::WithInsertPoint guard(n);
-  return createConstant(*n->owningGraph(), jit::as_tensor(value));
+  return createConstant(*n->owningGraph(), std::move(value));
 }
 
-template<typename T>
-static void genericInsertInput(jit::Node* n, size_t idx, T value) {
-  n->insertInput(idx, createConstant(n, value));
+static void genericInsertInput(jit::Node* n, size_t idx, jit::IValue value) {
+  n->insertInput(idx, createConstant(n, std::move(value)));
 }
 
 void failPositionalAttr() {
@@ -72,12 +70,13 @@ static void setposattr(jit::Node* n, size_t idx, const char *name, SparseTensorR
 static void setposattr(jit::Node* n, size_t idx, const char *name, const at::IntList& v)  {
   using ArgumentStash = jit::tracer::ArgumentStash;
   if (ArgumentStash::hasIntList(name)) {
+    jit::TensorType expected_type {at::kLong, -1, {}};
     auto info = ArgumentStash::popIntList(name);
     for (size_t i = 0; i < info.size(); ++i) {
       if (info[i] != nullptr) continue;
       info[i] = createConstant(n, v[i]);
+      info[i]->inferTypeFrom(info[i]->node()->t(jit::attr::value));
     }
-    jit::TensorType expected_type {at::kLong, -1, {}};
     for (jit::Value* v : info) {
       if (*v->type() != expected_type) {
         throw std::runtime_error(

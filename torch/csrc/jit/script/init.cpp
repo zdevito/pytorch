@@ -195,16 +195,16 @@ struct VISIBILITY_HIDDEN ConstantPythonValue : public PythonValue {
       return toSimple(createConstant(g, at::CPU(at::kByte).scalarTensor(py::cast<bool>(self)), loc));
     } else if(THPDevice_Check(self.ptr())) {
       auto device = (THPDevice*) self.ptr();
-      auto t = as_tensor({static_cast<int64_t>(device->device.type()), device->device.index()});
-      return toSimple(createConstant(g, t, loc, ListType::ofInts()));
+      std::vector<int64_t> v = {static_cast<int64_t>(device->device.type()), device->device.index()};
+      return toSimple(createConstant(g, std::move(v)));
     } else if(THPLayout_Check(self.ptr())) {
       auto layout = (THPLayout*) self.ptr();
       const auto v = static_cast<int64_t>(layout->layout);
-      return toSimple(createConstant(g, at::CPU(at::kLong).scalarTensor(v), loc, IntType::get()));
+      return toSimple(createConstant(g, v, loc));
     } else if(THPDtype_Check(self.ptr())) {
       auto dtype = (THPDtype*)(self.ptr());
       const auto v = static_cast<int64_t>(dtype->scalar_type);
-      return toSimple(createConstant(g, at::CPU(at::kLong).scalarTensor(v), loc, IntType::get()));
+      return toSimple(createConstant(g, v, loc));
     }
     return std::make_shared<ConstantPythonValue>(self);
   }

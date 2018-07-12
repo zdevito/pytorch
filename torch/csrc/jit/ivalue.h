@@ -87,6 +87,10 @@ using DoubleList = ConstantList<double>;
 // The tag is currently 4 bytes to determine the type, and 1 byte
 // to mark whether that type is a subtype of at::Retainable and needs
 // retain/release calls.
+
+#define TORCH_FORALL_TAGS(_) \
+  _(Tensor) _(Double) _(Int) _(Tuple) _(IntList) _(DoubleList)
+
 struct IValue {
   IValue()
   : IValue(static_cast<int64_t>(0)) {}
@@ -170,9 +174,12 @@ struct IValue {
   : tag(Tag::Int), retainable(false) {
     as_int = i;
   }
+
   // allow you to pass literals (3, 4) without ambiguity
   IValue(int32_t i)
   : IValue(static_cast<int64_t>(i)) {}
+  IValue(bool b)
+  : IValue(static_cast<int64_t>(b)) {}
 
   bool isInt() const { return Tag::Int == tag; }
   int64_t toInt() const {
@@ -182,6 +189,9 @@ struct IValue {
 
   // IntList
   IValue(Shared<IntList> v);
+  IValue(std::vector<int64_t> v);
+  IValue(at::ArrayRef<int64_t> v)
+  : IValue(std::vector<int64_t>(v.begin(), v.end())) {}
   bool isIntList() const { return Tag::IntList == tag; }
   Shared<IntList> toIntList() && {
     JIT_ASSERT(isIntList());
@@ -194,6 +204,7 @@ struct IValue {
 
   // DoubleList
   IValue(Shared<DoubleList> v);
+  IValue(std::vector<double> v);
   bool isDoubleList() const { return Tag::DoubleList == tag; }
   Shared<DoubleList> toDoubleList() && {
     JIT_ASSERT(isDoubleList());
@@ -202,6 +213,36 @@ struct IValue {
   Shared<DoubleList> toDoubleList() const & {
     JIT_ASSERT(isDoubleList());
     return toRetainable<DoubleList>();
+  }
+
+  // Scalar, which gets encoded as either an Int or a Double
+  IValue(at::Scalar s) {
+    if(s.isFloatingPoint()) {
+      *this = s.toDouble();
+    } else {
+      *this = s.toLong();
+    }
+  }
+  bool isScalar() {
+    return isDouble() || isInt();
+  }
+  at::Scalar toScalar() const {
+    if(isDouble())
+      return toDouble();
+    else if(isInt())
+      return toInt();
+    else
+      throw std::runtime_error("IValue is not a Scalar");
+  }
+
+  // for debugging
+  std::string tagKind() {
+    switch(tag) {
+      #define DEFINE_CASE(x) case Tag::x: return #x;
+      TORCH_FORALL_TAGS(DEFINE_CASE)
+      #undef DEFINE_CASE
+    }
+    return "Invalid Tag";
   }
 
   // generic v.to<at::Tensor>() implementations
@@ -231,7 +272,9 @@ private:
     retainable = false;
   }
   enum class Tag : uint32_t {
-    Tensor, Double, Int, Tuple, IntList, DoubleList
+    #define DEFINE_TAG(x) x,
+    TORCH_FORALL_TAGS(DEFINE_TAG)
+    #undef DEFINE_TAG
   };
   union {
     at::TensorImpl* as_tensor_impl;
@@ -242,6 +285,8 @@ private:
   Tag tag;
   bool retainable;
 };
+
+#undef TORCH_FORALL_TAGS
 
 
 #define DEFINE_TO(type, method_name) \
@@ -287,11 +332,15 @@ inline IValue::IValue(Shared<IntList> v)
 : tag(Tag::IntList), retainable(true) {
   as_retainable = v.detach();
 }
+inline IValue::IValue(std::vector<int64_t> v)
+: IValue(IntList::create(std::move(v))) {}
 
 inline IValue::IValue(Shared<DoubleList> v)
 : tag(Tag::DoubleList), retainable(true) {
   as_retainable = v.detach();
 }
+inline IValue::IValue(std::vector<double> v)
+: IValue(DoubleList::create(std::move(v))) {}
 
 
 }}
