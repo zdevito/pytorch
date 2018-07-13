@@ -103,65 +103,71 @@ struct SchemaParser {
     parseType(arg);
     args.push_back(std::move(arg));
   }
-  at::Tensor parseSingleConstant(TypeKind kind) {
+  IValue parseSingleConstant(TypeKind kind) {
     switch(L.cur().kind) {
       case TK_TRUE:
         L.next();
-        return one();
+        return true;
       case TK_FALSE:
         L.next();
-        return zero();
+        return false;
       case TK_FLOAT:
         L.next();
-        return as_tensor(static_cast<int64_t>(at::kFloat));
+        return static_cast<int64_t>(at::kFloat);
       case TK_IDENT: {
         auto tok = L.next();
         auto text = tok.text();
         if("cpu" == text) {
-          return as_tensor(static_cast<int64_t>(at::Device::Type::CPU));
+          return static_cast<int64_t>(at::Device::Type::CPU);
         } else if("strided" == text) {
-          return as_tensor(static_cast<int64_t>(at::kStrided));
+          return static_cast<int64_t>(at::kStrided);
         } else if("ElementwiseMean" == text) {
-          return as_tensor(static_cast<int64_t>(Reduction::ElementwiseMean));
+          return static_cast<int64_t>(Reduction::ElementwiseMean);
         } else {
           throw ErrorReport(L.cur().range) << "invalid numeric default value";
         }
-      } default:
+      }
+      default:
         std::string n;
         if(L.nextIf('-'))
           n = "-" + L.expect(TK_NUMBER).text();
         else
           n = L.expect(TK_NUMBER).text();
         if(kind == TypeKind::FloatType || n.find(".") != std::string::npos || n.find("e") != std::string::npos) {
-          return at::full({}, std::stod(n), at::kDouble); // float?
+          return std::stod(n);
         } else {
           int64_t v = std::stoll(n);
-          return at::full({}, v, at::kLong);
+          return v;
         }
     }
   }
-  at::Tensor parseConstantList(TypeKind kind) {
+  IValue convertToList(TypeKind kind, const SourceRange& range, std::vector<IValue> vs) {
+    switch(kind) {
+        case TypeKind::FloatType:
+          return fmap(vs, [](IValue v) {
+            return v.toDouble();
+          });
+        case TypeKind::IntType:
+          return fmap(vs, [](IValue v) {
+            return v.toInt();
+          });
+        default:
+          throw ErrorReport(range) << "lists are only supported for float or int types.";
+      }
+  }
+  IValue parseConstantList(TypeKind kind) {
     auto tok = L.expect('[');
-    std::vector<at::Tensor> vs;
+    std::vector<IValue> vs;
     if(L.cur().kind != ']') {
       do {
         vs.push_back(parseSingleConstant(kind));
       } while(L.nextIf(','));
     }
     L.expect(']');
-    if(vs.size() == 0) {
-      switch(kind) {
-        case TypeKind::FloatType:
-          return at::empty({}, at::kFloat);
-        case TypeKind::IntType:
-          return at::empty({}, at::kLong);
-        default:
-          throw ErrorReport(tok) << "empty lists are only supported for float or int types.";
-      }
-    }
-    return at::stack(vs);
+    return convertToList(kind, tok.range, std::move(vs));
   }
-  at::Tensor parseTensorDefault(const SourceRange& range) {
+
+  IValue parseTensorDefault(const SourceRange& range) {
     if("None" == L.expect(TK_IDENT).text()) {
       return at::Tensor();
     } else {
@@ -184,7 +190,9 @@ struct SchemaParser {
         if(L.cur().kind == TK_IDENT) {
           arg.default_value = parseTensorDefault(range);
         } else if(arg.N && L.cur().kind != '[') {
-          arg.default_value = parseSingleConstant(elem_kind->kind()).expand({*arg.N});
+          IValue v = parseSingleConstant(elem_kind->kind());
+          std::vector<IValue> repeated(*arg.N, v);
+          arg.default_value = convertToList(elem_kind->kind(), range, repeated);
         } else {
           arg.default_value = parseConstantList(elem_kind->kind());
         }
@@ -209,14 +217,6 @@ struct SchemaParser {
   }
   Lexer L;
   bool kwarg_only;
-  static at::Tensor one() {
-    static at::Tensor v = at::full({}, 1, at::kLong);
-    return v;
-  }
-  static at::Tensor zero() {
-    static at::Tensor v = at::full({}, 0, at::kLong);
-    return v;
-  }
 };
 }
 

@@ -408,7 +408,7 @@ struct CodeImpl {
     JIT_ASSERT(inst.debug_name == prim::Placeholder);
     auto offset = relativeJump(from_inst, to_inst);
     inst.callback = [offset](Stack & stack) {
-      auto t = tensor_as<int64_t>(pop(stack).toTensor());
+      auto t = pop(stack).toInt();
       return (t == 0) ? offset : 0;
     };
     inst.debug_name = prim::JumpZ;
@@ -420,7 +420,7 @@ struct CodeImpl {
     JIT_ASSERT(inst.debug_name == prim::Placeholder);
     auto offset = relativeJump(from_inst, to_inst);
     inst.callback = [offset](Stack & stack) {
-      auto t = tensor_as<int64_t>(pop(stack).toTensor());
+      auto t = pop(stack).toInt();
       return (t != 0) ? offset : 0;
     };
     inst.debug_name = prim::JumpNZ;

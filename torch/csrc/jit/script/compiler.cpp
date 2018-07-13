@@ -292,9 +292,9 @@ static bool isNumberSubtype(const TypePtr& type) {
 }
 
 at::optional<std::vector<int64_t>> getIntListAttribute(at::optional<int32_t> N, Value* input) {
-  auto list = constant_as<std::vector<int64_t>>(input);
+  auto list = constant_as<Shared<jit::IntList>>(input);
   if(list)
-    return std::vector<int64_t>(*list);
+    return std::vector<int64_t>((*list)->elements().begin(), (*list)->elements().end());
   // broadcast IntList[3] with value 4 -> {4, 4, 4}
   if(!N)
     return at::nullopt;
@@ -466,7 +466,7 @@ at::optional<std::vector<Value*>> tryMatchSchema(
       // the single int is then repeated to the length of the list
       if (isIntUsedAsIntList(v.value, arg)) {
         std::vector<Value*> repeated(*arg.N, v.value);
-        v.value = v.value = graph.create(prim::ListConstruct, repeated)->output()->setType(ListType::ofInts());
+        v.value = graph.create(prim::ListConstruct, repeated)->output()->setType(ListType::ofInts());
       }
 
       // Allow tuples that only contain integers to turn into lists of integers
@@ -602,9 +602,9 @@ static Value* ensureTensor(const SourceRange& range, Value* v) {
   return v;
 }
 
-static Value* ensureTensorOrNumber(const SourceRange& range, Value* v) {
-  if(!isNumberSubtype(v) && !isTensorSubtype(v)) {
-    throw ErrorReport(range) << "expected a Number or Tensor value but found a "
+static Value* ensureInt(const SourceRange& range, Value* v) {
+  if(v->type()->isSubtypeOf(*IntType::get())) {
+    throw ErrorReport(range) << "expected a int but found a "
                              << *v->type();
   }
   return v;
@@ -800,8 +800,19 @@ private:
     return expr_value;
   }
 
+  Value* emitCond(Expr cond) {
+    Value* v = emitExpr(cond, identity);
+    if(v->type()->isSubtypeOf(*DynamicType::get())) {
+      v = tensorToNum(cond.range(), v, IntType::get());
+    }
+    if(!v->type()->isSubtypeOf(*IntType::get())) {
+      throw ErrorReport(cond) << "expected a tensor or integer expression for condition but found " << v->type()->str();
+    }
+    return v;
+  }
+
   void emitIf(const If& stmt) {
-    Value* cond_value = emitExpr(stmt.cond());
+    Value* cond_value = emitCond(stmt.cond());
 
     Node* n = graph->insertNode(create(prim::If, stmt.range(), 0));
     n->addInput(cond_value);
@@ -890,13 +901,13 @@ private:
     {
       WithInsertPoint guard(n);
       if (max_trip_count) {
-        max_trip_count_val = emitExpr(max_trip_count.value(), ensureTensorOrNumber);
+        max_trip_count_val = emitExpr(max_trip_count.value(), ensureInt);
       } else {
         max_trip_count_val =
-            emitConst(Const::create(range, std::to_string(INT_MAX)));
+            createConstant(*graph, INT_MAX, range);
       }
       if (cond) {
-        cond_val = emitExpr(cond.value(), ensureTensorOrNumber);
+        cond_val = emitCond(cond.value());
       } else {
         cond_val = createConstant(*graph, true, range);
       }
@@ -916,7 +927,7 @@ private:
 
       // Also emit the conditional
       if (cond) {
-        Value* body_cond_value = emitExpr(cond.value(), ensureTensorOrNumber);
+        Value* body_cond_value = emitCond(cond.value());
         body_block->registerOutput(body_cond_value);
       } else {
         Value* cond_value_dummy = createConstant(*graph, true, range);
@@ -1390,7 +1401,7 @@ private:
         Compound::create(TK_LIST, loc, std::move(inputs));
     const auto input_values = getNamedValues(applyInputs->trees(),
                                              /*maybe_unpack*/false,
-                                             ensureTensorOrNumber);
+                                             identity);
     NamedValue tensor = input_values[0];
     NamedValue begin = input_values[1];
     NamedValue end = input_values[2];
@@ -1412,7 +1423,7 @@ private:
         Compound::create(TK_LIST, loc, std::move(inputs));
     auto input_values = getNamedValues(applyInputs->trees(),
                                         /*maybe_unpack*/false,
-                                        ensureTensorOrNumber);
+                                        identity);
     NamedValue tensor = input_values[0];
     NamedValue dim = NamedValue(
         loc,
