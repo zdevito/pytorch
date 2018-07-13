@@ -327,10 +327,10 @@ void PropagateShapeOnNode(Node * node, bool insert_expands) {
       handled = true;
     } break;
     case prim::TensorToNum:
-    case prim::NumToTensor: {
-      node->output()->setType(node->inputs()[0]->type());
-      handled = true;
-    } break;
+    // case prim::NumToTensor: {
+    //   node->output()->setType(node->inputs()[0]->type());
+    //   handled = true;
+    // } break;
     case prim::Undefined: {
       node->output()->setType(DynamicType::get());
       handled = true;

@@ -304,6 +304,8 @@ DEFINE_TO(double, toDouble)
 DEFINE_TO(int64_t, toInt)
 DEFINE_TO(Shared<DoubleList>, toDoubleList)
 DEFINE_TO(Shared<IntList>, toIntList)
+DEFINE_TO(at::Scalar, toScalar)
+
 #undef DEFINE_TO
 
 // non-mutable list

@@ -94,7 +94,7 @@ void desugarTripCounts(Block * b) {
       {
         WithInsertPoint guard(n);
         // int i = 0
-        Value* initial_trip_count = createConstant(*g, at::zeros({1}, at::kLong));
+        Value* initial_trip_count = createConstant(*g, 0);
         // Set up initial iteration number value for loop-carried dependency
         n->removeInput(0);
         // Input 0 is now initial termination condition, insert this after that.
@@ -112,7 +112,7 @@ void desugarTripCounts(Block * b) {
         // increment the trip count at the end of the body. Then, emit the same
         // conjunctive stopping condition as above.
 
-        Value* const_one = createConstant(*g, at::ones({1}, at::kLong));
+        Value* const_one = createConstant(*g, 1);
 
         Value* inc_trip_count =
             g->insertNode(g->create(

@@ -380,26 +380,13 @@ at::ArrayRef<Value*> createTupleUnpack(Value* v) {
   return g.insertNode(g.createTupleUnpack(v))->outputs();
 }
 
-
-static Value* numToTensor(
-    const SourceRange& loc,
-    Graph& graph,
-    Value* value) {
-  JIT_ASSERT(isNumberSubtype(value));
-  auto* result = graph.insertNode(graph.create(prim::NumToTensor, {value})
-      ->setSourceLocation(std::make_shared<SourceRange>(loc)))
-      ->output();
-  result->setType(DynamicType::get());
-  return result;
-}
-
 static Value* tensorToNum(
     const SourceRange& loc,
-    Graph& graph,
     Value* value,
     const TypePtr type) {
   JIT_ASSERT(isTensorSubtype(value));
   JIT_ASSERT(isNumberSubtype(type));
+  auto& graph = *value->owningGraph();
   auto* result = graph.insertNode(graph.create(prim::TensorToNum, {value})
       ->setSourceLocation(std::make_shared<SourceRange>(loc)))
       ->output();
@@ -474,34 +461,20 @@ at::optional<std::vector<Value*>> tryMatchSchema(
       NamedValue v = *positional_inputs[i];
       const auto& arg = schema.arguments[i];
 
-
       // some functions that take lists of integers for fixed size arrays
       // also allow single ints to be passed in their place.
       // the single int is then repeated to the length of the list
       if (isIntUsedAsIntList(v.value, arg)) {
         std::vector<Value*> repeated(*arg.N, v.value);
-        v.value = graph.insertNode(graph.createTuple(repeated))->output();
+        v.value = v.value = graph.create(prim::ListConstruct, repeated)->output()->setType(ListType::ofInts());
       }
 
-      // Tuples of integers are created using TuplePack which we do not actually
-      // support in the interpreter, so we have to replace it with a
-      // stack call, which creates a Tensor to represent the list.
+      // Allow tuples that only contain integers to turn into lists of integers
       if(*ListType::ofInts() == *arg.type &&
          v.value->type()->kind() == TypeKind::TupleType &&
          v.value->type()->isSubtypeOf(*ListType::ofInts())) {
         auto unpacked = createTupleUnpack(v.value);
-        // elements are numbers so we have to convert to tensors before
-        // stack will be valid
-        auto unpacked_t = fmap(unpacked, [&](Value* e) {
-          return numToTensor(v.loc, graph, e);
-        });
-        v.value = createStack(graph, loc, unpacked_t)->setType(ListType::ofInts());
-      }
-
-      // implicit conversion from Tensor to Python Number
-      // FIXME: remove this when we support passing numbers into script fns
-      if (isTensorSubtype(v.value) && isNumberSubtype(arg.type)) {
-        v.value = tensorToNum(loc, graph, v.value, arg.type);
+        v.value = graph.create(prim::ListConstruct, unpacked)->output()->setType(ListType::ofInts());
       }
 
       if(!v.value->type()->isSubtypeOf(*arg.type)) {
@@ -925,7 +898,7 @@ private:
       if (cond) {
         cond_val = emitExpr(cond.value(), ensureTensorOrNumber);
       } else {
-        cond_val = emitBooleanConst(range, true);
+        cond_val = createConstant(*graph, true, range);
       }
     }
     n->addInput(max_trip_count_val);
@@ -946,7 +919,7 @@ private:
         Value* body_cond_value = emitExpr(cond.value(), ensureTensorOrNumber);
         body_block->registerOutput(body_cond_value);
       } else {
-        Value* cond_value_dummy = emitBooleanConst(range, true);
+        Value* cond_value_dummy = createConstant(*graph, true, range);
         body_block->registerOutput(cond_value_dummy);
       }
 
@@ -1271,173 +1244,6 @@ private:
     throw std::runtime_error("reverseComparision: unsupported NodeKind. File a bug");
   }
 
-  std::vector<NamedValue> toNamedValues(
-      const SourceRange& loc,
-      ArrayRef<Value*> inputs) {
-    return fmap(inputs, [&](Value* v) {
-      return NamedValue(loc, "", v);
-    });
-  }
-
-  Value* emitBasicMath(
-      const SourceRange& loc,
-      Method& method,
-      NodeKind kind,
-      at::ArrayRef<Value*> inputs) {
-    auto sugared_ptr = emitBuiltinCall(
-        loc,
-        method,
-        kind.toUnqualString(),
-        toNamedValues(loc, inputs),
-        /*attributes=*/{},
-        /*required=*/true);
-    auto simple_ptr = std::dynamic_pointer_cast<SimpleValue>(sugared_ptr);
-    JIT_ASSERT(simple_ptr);
-    return simple_ptr->getValue();
-  }
-
-  // Handles binary python math ops.
-  Value* emitPythonMath(
-      const SourceRange& loc,
-      Method& method,
-      NodeKind kind,
-      Value* lhs,
-      Value* rhs) {
-    // Assume lhs, rhs are either IntType or FloatType.
-    bool lhs_is_float = lhs->type()->kind() == TypeKind::FloatType;
-    bool rhs_is_float = rhs->type()->kind() == TypeKind::FloatType;
-    JIT_ASSERT(lhs_is_float || lhs->type()->kind() == TypeKind::IntType);
-    JIT_ASSERT(rhs_is_float || rhs->type()->kind() == TypeKind::IntType);
-
-    auto out_type = lhs->type();
-    if (kind == aten::ge || kind == aten::le || kind == aten::eq ||
-        kind == aten::gt || kind == aten::lt || kind == aten::ne) {
-      // Stand-in for bool type.
-      out_type = NumberType::get();
-    } else {
-      // If the types are different, one must be FloatType.
-      // We should promote the other value to FloatType.
-      if (lhs_is_float != rhs_is_float) {
-        out_type = FloatType::get();
-      }
-    }
-
-    // Strategy: cast inputs to tensor, perform op, recast to number
-    lhs = numToTensor(loc, *graph, lhs);
-    rhs = numToTensor(loc, *graph, rhs);
-
-    // FIXME: support (python) math between IntType and FloatType.
-    // Here, without loss of generality, let's say lhs is a float and rhs is an
-    // int. We should insert an aten::type_as(lhs, rhs) node into the graph.
-    // However, the graph fuser generally has problems working with scalar tensors
-    // (#8560), so we don't support this right now.
-    if (lhs_is_float != rhs_is_float) {
-      throw std::runtime_error("NYI: math between float and int. See #8560.");
-    }
-
-    auto* out = emitBasicMath(loc, method, kind, { lhs, rhs });
-    return tensorToNum(loc, *graph, out, out_type);
-  }
-
-  // math ops between a tensor and a number require that the number be the
-  // the same type (ScalarType and Backend) as the tensor, because numbers
-  // in the JIT are represented as scalar tensors.
-  // This function casts the number to the same type as the tensor.
-  Value* emitTensorNumberMath(
-      const SourceRange& loc,
-      Method& method,
-      NodeKind kind,
-      Value* lhs,
-      Value* rhs) {
-    auto rhs_kind = rhs->type()->kind();
-    JIT_ASSERT(rhs_kind == TypeKind::FloatType || rhs_kind == TypeKind::IntType);
-    JIT_ASSERT(isTensorSubtype(lhs));
-
-    rhs = numToTensor(loc, *graph, rhs);
-    auto args = { rhs, lhs };
-    rhs = graph->insertNode(graph->create(aten::type_as, args))
-               ->output();
-    return emitBasicMath(loc, method, kind, { lhs, rhs });
-  }
-
-  // Handles binary math ops.
-  Value* emitMath(
-      const SourceRange& loc,
-      Method& method,
-      NodeKind kind,
-      ArrayRef<Value*> inputs) {
-    JIT_ASSERT(inputs.size() == 2);
-    auto& lhs = inputs[0];
-    auto& rhs = inputs[1];
-    bool lhs_is_number = isNumberSubtype(lhs);
-    bool lhs_is_tensor = isTensorSubtype(lhs);
-    bool rhs_is_number = isNumberSubtype(rhs);
-    bool rhs_is_tensor = isTensorSubtype(rhs);
-    JIT_ASSERT(lhs_is_tensor || lhs_is_number);
-    JIT_ASSERT(rhs_is_tensor || rhs_is_number);
-
-    if (lhs_is_number && rhs_is_number) {
-      return emitPythonMath(loc, method, kind, lhs, rhs);
-    }
-
-    if (lhs_is_number && rhs_is_tensor) {
-
-      // commutative operations: just swap the args
-      if (kind == aten::mul || kind == aten::add ||
-          kind == aten::ne || kind == aten::eq) {
-        return emitTensorNumberMath(loc, method, kind, rhs, lhs);
-
-      // rsub
-      } else if (kind == aten::sub) {
-        auto* node = emitNode(aten::neg, loc, { rhs }, 1);
-        return emitTensorNumberMath(loc, method, aten::add, node->output(), lhs);
-
-      // rdiv
-      } else if (kind == aten::div) {
-        auto* node = emitNode(aten::reciprocal, loc, { rhs }, 1);
-        return emitTensorNumberMath(loc, method, aten::mul, node->output(), lhs);
-
-      // Comparision ops: swap args and use reverse comparison
-      } else if (kind == aten::lt || kind == aten::le ||
-                 kind == aten::gt || kind == aten::ge) {
-        return emitTensorNumberMath(loc, method,
-                                    reverseComparision(kind),
-                                    rhs, lhs);
-      } else {
-        throw std::runtime_error("Unknown node kind, please file a bug report");
-      }
-    }
-
-    if (lhs_is_tensor && rhs_is_number) {
-      return emitTensorNumberMath(loc, method, kind, lhs, rhs);
-    }
-
-    return emitBasicMath(loc, method, kind, inputs);
-  }
-
-  // Handles unary math ops.
-  Value* emitUnaryMath(
-      const SourceRange& loc,
-      Method& method,
-      NodeKind kind,
-      ArrayRef<Value*> inputs) {
-    JIT_ASSERT(inputs.size() == 1);
-    auto* in = inputs[0];
-    bool in_is_number = isNumberSubtype(in);
-    bool in_is_tensor = isTensorSubtype(in);
-    JIT_ASSERT(in_is_number || in_is_tensor);
-
-    if (in_is_tensor) {
-      return emitBasicMath(loc, method, kind, inputs);
-    }
-
-    // Cast to tensor, perform op, recast to number
-    auto out_type = in->type();
-    in = numToTensor(loc, *graph, in);
-    auto* out = emitBasicMath(loc, method, kind, { in });
-    return tensorToNum(loc, *graph, out, out_type);
-  }
-
   // any expression that can produce a SugaredValue is handled here
   // expressions that only return a single Value* are handled in emitSimpleExpr
   std::shared_ptr<SugaredValue> emitSugaredExpr(Expr tree, size_t n_binders) {
@@ -1473,11 +1279,7 @@ private:
       case TK_POW:
       case TK_AND:
       case TK_OR:
-      case TK_NOT: {
-        const auto& inputs = tree->trees();
-        auto kind = getNodeKind(tree->kind(), inputs.size());
-        return emitNode(kind, tree->range(), getValues(inputs), 1)->output();
-      } break;
+      case TK_NOT:
       case TK_NE:
       case TK_EQ:
       case '<':
@@ -1487,17 +1289,19 @@ private:
       case '*':
       case '/':
       case '+':
-      case '-': {
-        const auto& inputs = tree->trees();
-        auto kind = getNodeKind(tree->kind(), inputs.size());
-        auto input_vals = getValues(inputs, /*maybe_unpack*/false, ensureTensorOrNumber);
-        return emitMath(tree->range(), method, kind, input_vals);
-      }
+      case '-':
       case TK_UNARY_MINUS: {
         const auto& inputs = tree->trees();
         auto kind = getNodeKind(tree->kind(), inputs.size());
-        auto input_vals = getValues(inputs, /*maybe_unpack*/false, ensureTensorOrNumber);
-        return emitUnaryMath(tree->range(), method, kind, input_vals);
+        auto named_values = getNamedValues(inputs, /*maybe_unpack=*/false, identity);
+        return emitBuiltinCall(
+                   tree->range(),
+                   method,
+                   kind.toUnqualString(),
+                   named_values,
+                   {},
+                   /*required=*/true)
+            ->asValue(tree->range(), method);
       }
       case TK_STARRED: {
         throw ErrorReport(tree) << "Unexpected starred expansion. File a bug report.";
@@ -1510,10 +1314,10 @@ private:
         return emitConst(Const(tree));
       } break;
       case TK_TRUE: {
-        return emitBooleanConst(tree->range(), true);
+        return createConstant(*graph, true, tree->range());
       } break;
       case TK_FALSE: {
-        return emitBooleanConst(tree->range(), false);
+        return createConstant(*graph, false, tree->range());
       } break;
       case TK_SLICE: {
         const auto slice = Slice(tree);
@@ -1541,47 +1345,28 @@ private:
   }
 
   Value* emitCast(Expr input, const ScalarType& type) {
-    at::ScalarType t;
+    auto v = emitExpr(input, ensureTensor);
+    TypePtr typ;
     switch (type.kind()) {
       case TK_INT:
-        t = at::kInt;
+      case TK_LONG:
+      case TK_BOOL:
+        typ = IntType::get();
         break;
       case TK_FLOAT:
-        t = at::kFloat;
-        break;
-      case TK_LONG:
-        t = at::kLong;
-        break;
-      case TK_BOOL:
-        t = at::kByte;
+        typ = FloatType::get();
         break;
       default:
         throw ErrorReport(input) << "Unrecognized type: " << type;
     }
-    return emitNode(
-               Symbol::aten("type_as"),
-               input.range(),
-               {emitExpr(input), createConstant(*graph, at::ones({1}, t), input.range())},
-               1)
-        ->output();
-  }
-
-  Value* emitBooleanConst(SourceRange range, bool val) {
-    return createConstant(*graph, at::CPU(at::kByte).scalarTensor(val), range);
+    return tensorToNum(input.range(), v, typ);
   }
 
   Value* emitConst(const Const& c) {
-    if (c.isFloatingPoint()) {
-      return createNumber(
-          *graph,
-          c.range(),
-          at::CPU(at::kFloat).scalarTensor(c.asFloatingPoint()));
-    } else {
-      return createNumber(
-          *graph,
-          c.range(),
-          at::CPU(at::kLong).scalarTensor(c.asIntegral()));
-    }
+    if (c.isFloatingPoint())
+      return createConstant(*graph, c.asFloatingPoint(), c.range());
+    else
+      return createConstant(*graph, c.asIntegral(), c.range());
   }
 
   Node* emitNode(
@@ -1610,9 +1395,9 @@ private:
     NamedValue begin = input_values[1];
     NamedValue end = input_values[2];
     NamedValue dim = NamedValue(loc, "dim",
-        createConstant(*graph, at::CPU(at::kLong).scalarTensor(0), loc));
+        createConstant(*graph, 0, loc));
     NamedValue step = NamedValue(loc, "step",
-        createConstant(*graph, at::CPU(at::kLong).scalarTensor(1), loc));
+        createConstant(*graph, 1, loc));
 
     return emitBuiltinCall(
                loc, method, "slice", {tensor, dim, begin, end, step}, {}, true)
@@ -1632,7 +1417,7 @@ private:
     NamedValue dim = NamedValue(
         loc,
         "dim",
-        createConstant(*graph, at::CPU(at::kLong).scalarTensor(0), loc));
+        createConstant(*graph, 0, loc));
     NamedValue idx = input_values[1];
 
     return emitBuiltinCall(loc, method, "select", {tensor, dim, idx}, {}, true)

@@ -140,7 +140,7 @@ void replaceLoopCounter(Node *loop) {
   Value* init_counter;
   {
     WithInsertPoint guard(loop);
-    init_counter = createConstant(*graph, at::CPU(at::kLong).scalarTensor(0));
+    init_counter = createConstant(*graph, 0);
   }
   loop->insertInput(2, init_counter);
   loop->insertOutput(0);

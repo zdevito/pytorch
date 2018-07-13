@@ -24,16 +24,16 @@ static void EraseNumberTypesOnBlock(Block* block) {
         it->output()->replaceAllUsesWith(it->inputs()[0]);
         // Let DCE cleanup
       } break;
-      case prim::NumToTensor: {
-        auto* ten = it->output();
-        for (const auto& use : ten->uses()) {
-          if (isNumberTypeCast(ten, use)) {
-            use.user->output()->replaceAllUsesWith(ten);
-          }
-        }
-        ten->replaceAllUsesWith(it->inputs()[0]);
-        // Let DCE cleanup
-      } break;
+      // case prim::NumToTensor: {
+      //   auto* ten = it->output();
+      //   for (const auto& use : ten->uses()) {
+      //     if (isNumberTypeCast(ten, use)) {
+      //       use.user->output()->replaceAllUsesWith(ten);
+      //     }
+      //   }
+      //   ten->replaceAllUsesWith(it->inputs()[0]);
+      //   // Let DCE cleanup
+      // } break;
       default: {
         for(auto o : it->outputs()) {
           if (o->type()->isSubtypeOf(*NumberType::get())) {
