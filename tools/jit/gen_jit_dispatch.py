@@ -87,28 +87,31 @@ FROM_ATTRIBUTE = {
 
 # map from aten 'simple_type' to the function that will turn a tensor into
 # that type
-FROM_TENSOR = {
-    'Device': 'tensor_as<std::vector<int64_t>>',
-    'ScalarType': 'tensor_as<int64_t>',
-    'Layout': 'tensor_as<int64_t>',
-    'IntList': 'tensor_as<std::vector<int64_t>>',
+FROM_IVALUE = {
+    'Tensor': '{}.toTensor()',
+    'Device': '{}.toIntList()->elements()',
+    'ScalarType': '{}.toInt()',
+    'Layout': '{}.tInt()',
+    'IntList': '{}.toIntList()->elements()',
+    'int64_t': '{}.toInt()',
+    'Scalar': '{}.toScalar()',
+    'bool': '{}.toInt()',
+    'double': '{}.toDouble()',
+    'std::array<bool,2>': 'as_array<bool, 2>({}.toIntList()->elements())',
+    'std::array<bool,3>': 'as_array<bool, 3>({}.toIntList()->elements())',
+    'std::array<bool,4>': 'as_array<bool, 4>({}.toIntList()->elements())',
 }
 
 
-def from_tensor(arg):
+def from_ivalue(arg, value):
     simple_type = arg['simple_type']
-    if simple_type in FROM_TENSOR:
-        return FROM_TENSOR[simple_type]
-    else:
-        return 'tensor_as<{}>'.format(arg['simple_type'])
-
+    if simple_type not in FROM_IVALUE:
+        print simple_type
+        return 'nope'
+    return FROM_IVALUE[simple_type].format(value)
 
 KW_ASSIGNMENT = CodeTemplate("""\
 auto ${name} = ${type_cast}(node->${method}(Symbol::attr("${name}")));\
-""")
-
-POS_ASSIGNMENT = CodeTemplate("""\
-auto ${name} = ${from_tensor}(std::move(peek(stack, ${i}, ${N})).toTensor());\
 """)
 
 CALL_NAMESPACE = CodeTemplate("""\
@@ -132,7 +135,6 @@ CONSTRUCTOR = CodeTemplate("""\
   ${kw_assignments}
   return Operation([=](Stack & stack) {
     autograd::profiler::RecordFunction record("${name}");
-    ${pos_assignments}
     ${call}
     drop(stack, ${num_dynamic_inputs});
     pack(stack, std::move(result));
@@ -217,7 +219,6 @@ def gen_jit_dispatch(declarations, out, template_path):
         # that indicates if the argument should come from the postional list
         # of inputs. If false, the argument comes from the constant attributes
         kw_assignments = []
-        pos_assignments = []
         arguments = []
 
         if has_tensorlist:
@@ -266,20 +267,10 @@ def gen_jit_dispatch(declarations, out, template_path):
                                  .format(real_inputs, static_inputs))
             elif arg['simple_type'] in default_only_types:
                 arguments.append(arg['default'])
-            elif is_tensor_arg(arg):
-                arguments.append('std::move(peek(stack, {}, {})).toTensor()'.format(real_inputs, view_length))
+            elif is_tensor_arg(arg) or is_positional_arg[i]:
+                value = '(std::move(peek(stack, {}, {})))'.format(real_inputs, view_length)
+                arguments.append(from_ivalue(arg, value))
                 real_inputs += 1
-            elif is_positional_arg[i]:
-                template_kwargs = dict(from_tensor=from_tensor(arg),
-                                       name=arg['name'],
-                                       i=real_inputs,
-                                       N=view_length)
-                real_inputs += 1
-
-                assign = POS_ASSIGNMENT.substitute(**template_kwargs)
-
-                pos_assignments.append(assign)
-                arguments.append(arg['name'])
             else:
                 attr_method = attr_of(jit_type_of(arg))
                 simple_type = arg['simple_type']
@@ -297,7 +288,6 @@ def gen_jit_dispatch(declarations, out, template_path):
         constructor = CONSTRUCTOR.substitute(name=decl['name'],
                                              call=[call],  # in an array so that substitute handles newlines correctly
                                              kw_assignments=kw_assignments,
-                                             pos_assignments=pos_assignments,
                                              num_dynamic_inputs=num_dynamic_inputs)
         return constructor
 
