@@ -191,7 +191,15 @@ bool isValidReturnForRunning(Value* v) {
       v->type()->isSubtypeOf(NumberType::get());
 }
 
+std::unordered_set<Symbol> cannot_propagate_shape_by_running_it = {
+  aten::gesv,
+  aten::inverse,
+};
+
 bool canPropagateShapeByRunningIt(Node* node) {
+  if(cannot_propagate_shape_by_running_it.count(node->kind()))
+    return false;
+
   bool valid_args = std::all_of(
       node->inputs().begin(), node->inputs().end(), isValidArgumentForRunning);
   if (!valid_args)
