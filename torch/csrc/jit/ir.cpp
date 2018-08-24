@@ -23,7 +23,29 @@ constexpr Symbol PythonOp::Kind;
 
 constexpr int max_tensor_display_size = 10;
 
+bool isSimpleConstant(const Node* n) {
+  if(n->kind() != prim::Constant)
+    return false;
+  switch(n->kindOf(attr::value)) {
+    case AttributeKind::f:
+    case AttributeKind::i:
+      return true;
+    case AttributeKind::fs:
+      return n->fs(attr::value).size() < 8;
+    case AttributeKind::is:
+      return n->is(attr::value).size() < 8;
+    default:
+      return false;
+  }
+}
+
+void printAttributeValue(std::ostream & out, const Node * n, Symbol name);
+
 void printValueRef(std::ostream & out, const Value * n) {
+  if(isSimpleConstant(n->node())) {
+    printAttributeValue(out, n->node(), attr::value);
+    return;
+  }
   out << "%" << n->uniqueName();
 }
 
@@ -97,6 +119,64 @@ std::string escapeString(std::string s) {
   return s;
 }
 
+void printAttributeValue(std::ostream & out, const Node * n, Symbol name) {
+  switch(n->kindOf(name)) {
+    case AttributeKind::f:
+      out << n->f(name);
+      break;
+    case AttributeKind::fs:
+      printPrimList(out,n->fs(name));
+      break;
+    case AttributeKind::i:
+      out << n->i(name);
+      break;
+    case AttributeKind::is:
+      printPrimList(out,n->is(name));
+      break;
+    case AttributeKind::s:
+      out << escapeString(n->s(name));
+      break;
+    case AttributeKind::ss:
+      printPrimList(out,n->ss(name));
+      break;
+    case AttributeKind::t:
+      {
+        at::Tensor t = n->t(name);
+        // 1-elem tensors are usually boxed scalars, so print them like it
+        if (t.numel() == 1) {
+          auto scalar = at::Scalar(t.view({})).local();
+          out << "{";
+          if (scalar.isFloatingPoint()) {
+            out << scalar.toDouble();
+          } else {
+            out << scalar.toLong();
+          }
+          out << "}";
+        } else if (t.numel() <= max_tensor_display_size) {
+          // TODO: This is awful code.  Also it doesn't work on Windows.
+          std::ostringstream tensor_ss;
+          tensor_ss << t;
+          std::string tensor_s{tensor_ss.str()};
+          // Remove newlines
+          std::replace(tensor_s.begin(), tensor_s.end(), '\n', ' ');
+          out << tensor_s;
+        } else {
+          out << "<Tensor>";
+        }
+        break;
+      }
+    case AttributeKind::ts:
+      out << "[<Tensors>]";
+      break;
+    case AttributeKind::g:
+      out << "<Graph>";
+      break;
+    case AttributeKind::gs:
+      out << "[<Graphs>]";
+      break;
+  }
+}
+
 void printAttributes(std::ostream & out, const Node * n, bool ignore_subgraph=false) {
   out << "[";
   auto names = n->attributeNames();
@@ -111,61 +191,7 @@ void printAttributes(std::ostream & out, const Node * n, bool ignore_subgraph=fa
     // be attribute, but you might be able to track down a weird
     // bug by printing it out.
     out << name.toUnqualString() <<"=";
-    switch(n->kindOf(name)) {
-      case AttributeKind::f:
-        out << n->f(name);
-        break;
-      case AttributeKind::fs:
-        printPrimList(out,n->fs(name));
-        break;
-      case AttributeKind::i:
-        out << n->i(name);
-        break;
-      case AttributeKind::is:
-        printPrimList(out,n->is(name));
-        break;
-      case AttributeKind::s:
-        out << escapeString(n->s(name));
-        break;
-      case AttributeKind::ss:
-        printPrimList(out,n->ss(name));
-        break;
-      case AttributeKind::t:
-        {
-          at::Tensor t = n->t(name);
-          // 1-elem tensors are usually boxed scalars, so print them like it
-          if (t.numel() == 1) {
-            auto scalar = at::Scalar(t.view({})).local();
-            out << "{";
-            if (scalar.isFloatingPoint()) {
-              out << scalar.toDouble();
-            } else {
-              out << scalar.toLong();
-            }
-            out << "}";
-          } else if (t.numel() <= max_tensor_display_size) {
-            // TODO: This is awful code.  Also it doesn't work on Windows.
-            std::ostringstream tensor_ss;
-            tensor_ss << t;
-            std::string tensor_s{tensor_ss.str()};
-            // Remove newlines
-            std::replace(tensor_s.begin(), tensor_s.end(), '\n', ' ');
-            out << tensor_s;
-          } else {
-            out << "<Tensor>";
-          }
-          break;
-        }
-      case AttributeKind::ts:
-        out << "[<Tensors>]";
-        break;
-      case AttributeKind::g:
-        out << "<Graph>";
-        break;
-      case AttributeKind::gs:
-        out << "[<Graphs>]";
-        break;
-    }
+    printAttributeValue(out, n, name);
   }
   out << "]";
 }
@@ -210,7 +236,9 @@ std::ostream& printNode(std::ostream & out, size_t level, const Node * n, std::v
     auto b = n->blocks()[i];
     indent(out, level + 1) << "block" << i << "(" << const_value_list_with_types(b->inputs(), false) << ") {\n";
     for(auto n : b->nodes()) {
-      printNode(out, level + 2, n, groups);
+      if(!isSimpleConstant(n)) {
+        printNode(out, level + 2, n, groups);
+      }
     }
     indent(out, level + 2) << "-> (" << b->outputs() << ")\n";
     indent(out, level + 1) << "}\n";
@@ -231,7 +259,9 @@ std::ostream& operator<<(std::ostream & out, const Graph & g) {
       out << "  ---------------- stage " << n->stage() << " ----------------\n";
       prev_stage = n->stage();
     }
-    printNode(out, 1, n, &groups);
+    if(!isSimpleConstant(n)) {
+      printNode(out, 1, n, &groups);
+    }
   }
   out << "  return (" << g.outputs() << ");\n}\n";
   size_t i = 0;
