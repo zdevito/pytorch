@@ -165,42 +165,6 @@ protected:
   py::object self;
 };
 
-// A Python value respresenting a custom op namespace object, like
-// `torch.ops.my_namespace`. When accessing an attribute, it is assumed that it
-// is the function under that custom op namespace we want to call, and a
-// `BuiltinFunction` value is returned for it.
-struct VISIBILITY_HIDDEN CustomOpNamespaceValue : public PythonValue {
-  explicit CustomOpNamespaceValue(py::object obj)
-      : PythonValue(std::move(obj)) {}
-
-  std::shared_ptr<SugaredValue> attr(
-      SourceRange loc,
-      Method& m,
-      const std::string& field) override {
-    py::object member = getattr(loc, field);
-    const auto op_namespace = py::cast<std::string>(self.attr("name"));
-    // The symbol name is the op namespace + the op (function) name, which is
-    // being accessed as the `field` here.
-    auto symbol = Symbol::fromQualString(op_namespace + "::" + field);
-    return std::make_shared<BuiltinFunction>(
-        std::move(symbol), at::nullopt);
-  }
-};
-
-// The `torch.ops` value. All it does is create `CustomOpNamespaceValue`
-// objects when accessing attributes under it, e.g. `torch.ops.my_namespace`.
-struct VISIBILITY_HIDDEN CustomOpsValue : public PythonValue {
-  explicit CustomOpsValue(py::object obj) : PythonValue(std::move(obj)) {}
-
-  std::shared_ptr<SugaredValue> attr(
-      SourceRange loc,
-      Method& m,
-      const std::string& field) override {
-    py::object member = getattr(loc, field);
-    return std::make_shared<CustomOpNamespaceValue>(member);
-  }
-};
-
 struct VISIBILITY_HIDDEN PythonModuleValue : public PythonValue {
   explicit PythonModuleValue(py::object mod) : PythonValue(mod) {}
 
@@ -212,30 +176,6 @@ struct VISIBILITY_HIDDEN PythonModuleValue : public PythonValue {
     return toSugaredValue(member, m, loc);
   }
 };
-
-struct VISIBILITY_HIDDEN BuiltinPythonModuleValue : public PythonModuleValue {
-  explicit BuiltinPythonModuleValue(py::object mod) : PythonModuleValue(mod) {}
-  std::shared_ptr<SugaredValue> attr(SourceRange loc, Method & m, const std::string& field) override {
-    // We support calling functions and using type/layout/device constants
-    // on the torch builtin modules
-    py::object member = getattr(loc, field);
-    if (py::isinstance<py::function>(member)) {
-      return std::make_shared<BuiltinFunction>(
-          Symbol::aten(field), at::nullopt);
-    } else if (field == "ops") {
-      return std::make_shared<CustomOpsValue>(member);
-    }
-    return toSugaredValue(member, m, loc, /*is_constant =*/true);
-  }
-};
-
-bool isBuiltinModule(py::object obj) {
-  // XXX: these can't be static, or they will be destructed after the Python interpreter
-  // exits and that generally sounds like a bad idea
-  py::object torch = py::module::import("torch");
-  py::object functional = py::module::import("torch.nn.functional");
-  return obj.is(torch) || obj.is(functional);
-}
 
 struct VISIBILITY_HIDDEN ConstantPythonTupleValue : public PythonValue {
   explicit ConstantPythonTupleValue(py::object tup) : PythonValue(tup) {}
@@ -391,11 +331,12 @@ std::shared_ptr<SugaredValue> toSugaredValue(
     }
     return std::make_shared<ModuleValue>(mod);
   } else if (py::isinstance<py::module>(obj)) {
-    if (isBuiltinModule(obj)) {
-      return std::make_shared<BuiltinPythonModuleValue>(obj);
-    } else {
-      return std::make_shared<PythonModuleValue>(obj);
-    }
+    return std::make_shared<PythonModuleValue>(obj);
+  }
+  py::object builtin_name = py::module::import("torch.jit").attr("_find_builtin")(obj);
+  if (!builtin_name.is_none()) {
+    return std::make_shared<BuiltinFunction>(
+        Symbol::fromQualString(py::str(builtin_name)), at::nullopt);
   }
   return std::make_shared<PythonValue>(obj);
 }

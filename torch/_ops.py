@@ -3,7 +3,7 @@ import torch._C
 import contextlib
 import ctypes
 import sys
-
+import torch.jit
 
 # Query `hasattr` only once.
 _SET_GLOBAL_FLAGS = hasattr(sys, 'getdlopenflags') and hasattr(sys, 'setdlopenflags')
@@ -49,7 +49,11 @@ class _OpNamespace(object):
     def __getattr__(self, op_name):
         # Get the op `my_namespace::my_op` if available. This will also check
         # for overloads and raise an exception if there are more than one.
-        op = torch._C._jit_get_operation('{}::{}'.format(self.name, op_name))
+        qualified_op_name = '{}::{}'.format(self.name, op_name)
+        op = torch._C._jit_get_operation(qualified_op_name)
+        # let the script frontend know that op is identical to the builtin op
+        # with qualified_op_name
+        torch.jit._register_builtin(op, qualified_op_name)
         setattr(self, op_name, op)
         return op
 
