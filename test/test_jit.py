@@ -6149,8 +6149,7 @@ a")
                 return x
 
     def test_trace_checker_inplace_on_view(self):
-        with self.assertRaisesRegex(torch.jit.TracingCheckError, r'Traced function outputs do not match the Python'
-                                                                 r' function outputs'):
+        with self.assertRaisesRegex(RuntimeError, "Cannot trace in-place operator 'add_' because there are"):
             @_trace(torch.rand(3, 4), check_inputs=[(torch.rand(5, 6),)])
             def foo(x):
                 x.view(-1).add_(-x.view(-1))

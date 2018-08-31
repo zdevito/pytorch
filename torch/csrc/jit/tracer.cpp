@@ -162,4 +162,17 @@ void setRecordSourceLocation(void (*v)(Node*)) {
   record_source_location.store(v);
 }
 
+
+void ensureUnique(const char * name, const at::Tensor& tensor) {
+  auto aliases = tensor.storage().use_count();
+  if (aliases > 1) {
+    std::stringstream ss;
+    ss << "Cannot trace in-place operator '" << name << "' because there are "
+       << aliases << " live references to the tensor it will mutate." <<
+       " Try to express the operator using out-of-place operators instead.";
+    throw std::runtime_error(ss.str());
+  }
+}
+
+
 }}}

@@ -247,6 +247,7 @@ void addInputs(Node *n, const char * name, std::array<bool, N> value) {
 }
 
 TORCH_API void postRecordTrace(Node* node, at::ArrayRef<Variable> outputs);
+TORCH_API void ensureUnique(const char * name, const at::Tensor& tensor);
 
 inline void postRecordTrace(Node* node, at::ArrayRef<at::Tensor> tensors) {
   postRecordTrace(node, fmap<Variable>(tensors));
