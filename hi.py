@@ -44,7 +44,7 @@ import torch
 #
 #
 a = torch.rand(4)
-# two
+# unnamed
 
 
 def foo(b):
