@@ -39,6 +39,7 @@ from torch.jit import BatchTensor
 # For testing truediv in python 2
 from test_module.future_div import div_int_future, div_float_future
 from test_module.no_future_div import div_int_nofuture, div_float_nofuture
+from tools.setup_helpers.env import check_env_flag
 
 # load_tests from common_utils is used to automatically filter tests for
 # sharding on sandcastle. This line silences flake warnings
@@ -52,6 +53,7 @@ except ImportError:
 
 
 skipIfNoTorchVision = unittest.skipIf(not HAS_TORCHVISION, "no torchvision")
+skipIfFast = unittest.skipIf(check_env_flag('JIT_TEST_FAST'), "not fast")
 
 RUN_CUDA = torch.cuda.is_available()
 RUN_CUDA_HALF = RUN_CUDA
@@ -239,9 +241,9 @@ class JitTestCase(TestCase):
         # disable the hook while we parse code, otherwise we will re-enter the hook
         with self.disableModuleHook():
             for name in module._method_names():
-                graph = module._get_method(name).graph
+                method = module._get_method(name)
                 try:
-                    pp, constant_table = graph.python_print()
+                    pp, constant_table = method.python_print()
                 except RuntimeError as e:
                     if "could not export python function" not in str(e):
                         raise
@@ -251,12 +253,12 @@ class JitTestCase(TestCase):
                 ppv = "op_version_set = 0\n{}".format(pp)
                 sm = torch.jit.ScriptModule()
                 torch._C._jit_import_method(sm, ppv, constant_table)
-
-                pp2, _ = sm.script.graph.python_print()
+                method2 = sm._get_method(name)
+                pp2, _ = method2.python_print()
                 if pp != pp2:
-                    print(graph)
+                    print(method.graph)
                     print(pp)
-                    print(sm.script.graph)
+                    print(method2.graph)
                     print(pp2)
                     self.assertMultiLineEqual(pp, pp2)
 
@@ -2148,7 +2150,7 @@ class TestJit(JitTestCase):
         r = foo.graph.pretty_print()
         mod = torch.jit.ScriptModule()
         torch._C._jit_import_method(mod, "op_version_set = 0\n{}".format(r), [])
-        self.assertExpected(mod.script.graph.pretty_print())
+        self.assertExpected(mod.graph.graph.pretty_print())
 
     def test_function_default_values(self):
         outer_var = torch.tensor(20)
@@ -2899,12 +2901,12 @@ class TestScript(JitTestCase):
             def foo():
                 return math.pi, 0.1, mod.inf, mod.ninf, 2.225073858507201e-308, mod.nan
 
-            pp, table = foo.graph.python_print()
+            pp, table = foo._get_method('forward').python_print()
             ppv = "op_version_set = 0\n{}".format(pp)
             sm = torch.jit.ScriptModule()
             torch._C._jit_import_method(sm, ppv, table)
             r = foo()
-            r2 = sm.script()
+            r2 = sm()
             # use precise assert, we are checking floating point details
             self.assertTrue(r[:-1] == r2[:-1])
             self.assertTrue(math.isnan(r[-1]) and math.isnan(r2[-1]))
@@ -8721,6 +8723,7 @@ class TestEndToEndHybridFrontendModels(JitTestCase):
 
         self.checkTrace(TransformerNet(), (torch.rand(5, 3, 64, 64),), export_import=check_export_import)
 
+    @skipIfFast
     def test_neural_style(self):
         self._test_neural_style(self, device='cpu')
 
@@ -8886,6 +8889,7 @@ class TestEndToEndHybridFrontendModels(JitTestCase):
                         inputs_require_grads=False, export_import=check_export_import)
 
     @skipIfRocm
+    @skipIfFast
     def test_snli(self):
         self._test_snli(self, device='cpu')
 
