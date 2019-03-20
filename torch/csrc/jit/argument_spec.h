@@ -111,6 +111,27 @@ struct ArgumentSpec {
     }
   }
 
+  void addTensor(const IValue& input, size_t& offset, bool with_grad) {
+    auto& arg = args.at(offset);
+    // Initialize all fields to 0. This is convenient, because e.g.
+    // requires_grad() can be checked even on tensors AND will make
+    // padding bits all 0s.
+    std::memset(&arg, 0, sizeof(ArgumentInfo));
+
+    AT_ASSERT(input.isTensor());
+    at::Tensor* t = (at::Tensor*) &input;
+    if ((arg.defined_ = t->defined())) {
+      arg.requires_grad_ = with_grad && autograd::Variable(*t).requires_grad();
+      arg.dim_ = t->dim();
+      arg.device_ = t->is_cuda() ? t->get_device() : -1;
+      arg.type_ = static_cast<unsigned>(t->scalar_type());
+    }
+
+    arg.is_tensor_ = true;
+    combineHash(arg);
+    offset++;
+  }
+
   void combineHash(const ArgumentInfo& arg) {
     ArgumentInfo::plain_data_type arg_data;
     std::memcpy(&arg_data, &arg, sizeof(ArgumentInfo));

@@ -1160,6 +1160,1206 @@ void testNoneSchemaMatch() {
   // checking that constant propagation ran wo/failure
   AT_ASSERT(std::distance(nodes.begin(), nodes.end()) == 1);
 }
+
+enum Inst : char {
+  SPEC_TENSOR = 't',
+  SKIP = 's',
+  ENTER_TUPLE = 'e',
+  LEAVE = 'l',
+  SPEC_TENSOR_AND_PUSH = 'p',
+};
+
+IValue createInst(std::shared_ptr<script::Module> mod, std::vector<Inst>& insts) {
+  insts.push_back(ENTER_TUPLE);
+  size_t loc = insts.size();
+  std::vector<IValue> values;
+  for(auto& p : mod->get_parameters()) {
+    values.push_back(*p->slot());
+    insts.push_back(SPEC_TENSOR_AND_PUSH);
+  }
+  for(auto& p : mod->get_attributes()) {
+    if(p->slot()->isTensor()) {
+      values.push_back(*p->slot());
+      insts.push_back(SPEC_TENSOR_AND_PUSH);
+    }
+  }
+  for(auto& s : mod->get_modules()) {
+    std::cout << "ENTR " << s->name << "\n";
+    values.push_back(createInst(s->module, insts));
+    std::cout << "LEAVE " << s->name << "\n";
+  }
+  if (loc == insts.size()) {
+    //nothing happened, replace ENTER_TUPLE with SKIP,
+    insts.back() = SKIP;
+  } else {
+    insts.push_back(LEAVE);
+  }
+  return Tuple::create(std::move(values));
+}
+
+size_t traditionalArgSpec(const std::vector<script::Slot>& slots, const IValue& input, size_t total_size) {
+  std::vector<IValue> inputs;
+  inputs.reserve(total_size);
+  inputs.emplace_back(input);
+  for(auto & slot : slots)
+    inputs.emplace_back(*slot);
+  ArgumentSpec spec(false, inputs, total_size);
+
+  //std::cout << inputs.size() << " <- old\n";
+  return spec.hashCode();
+}
+
+
+size_t newArgSpec(const std::vector<Inst>& insts, const IValue& self, const IValue& input, size_t total_size) {
+  std::vector<IValue> inputs;
+  inputs.reserve(total_size + 1);
+  inputs.emplace_back(self);
+  inputs.emplace_back(input);
+
+  ArgumentSpec spec(true, {}, total_size);
+  size_t offset = 0;
+  IValue* stack[128];
+  stack[0] = &inputs[0];
+  size_t stack_i = 0;
+  for(Inst inst : insts) {
+    switch (inst) {
+      case SPEC_TENSOR:
+        spec.addTensor(*stack[stack_i]++, offset, false);
+        break;
+      case SKIP:
+        stack[stack_i]++;
+        break;
+      case LEAVE:
+        --stack_i;
+        break;
+      case ENTER_TUPLE: {
+        IValue* iv = stack[stack_i++]++;
+        AT_ASSERT(iv->isTuple());
+        auto p = *(at::ivalue::Tuple**) iv;
+        auto tup_ptr = &p->elements()[0];
+        stack[stack_i] = tup_ptr;
+      } break;
+      case SPEC_TENSOR_AND_PUSH:
+        IValue t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+        break;
+    }
+  }
+  // std::cout << inputs.size() << " <- new\n";
+  return spec.hashCode();
+}
+
+size_t newArgSpec2(const std::vector<Inst>& insts, const IValue& self, const IValue& input, size_t total_size) {
+  std::vector<IValue> inputs;
+  inputs.reserve(total_size + 1);
+  inputs.emplace_back(self);
+  inputs.emplace_back(input);
+
+  ArgumentSpec spec(true, {}, total_size);
+  size_t offset = 0;
+  IValue* stack[128];
+  stack[0] = &inputs[0];
+  size_t stack_i = 0;
+
+        auto tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        auto  t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        --stack_i;
+
+
+        stack[stack_i]++;
+
+
+        tup_ptr = &(*stack[stack_i++]++).toTuple()->elements()[0];
+        stack[stack_i] = tup_ptr;
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+          t =  *stack[stack_i]++;
+        spec.addTensor(t, offset, false);
+        inputs.push_back(std::move(t));
+
+
+        --stack_i;
+
+
+        --stack_i;
+  //std::cout << inputs.size() << " <- new\n";
+  return spec.hashCode();
+}
+
+void testArgSpec() {
+  std::shared_ptr<script::Module> mod = torch::jit::load("what.pt");
+
+  std::vector<Inst> insts;
+  std::vector<IValue> inputs;
+  // torch.ones(1, 3, 224, 224)
+  IValue self = createInst(mod, insts);
+  IValue input = torch::ones({1, 3, 224, 224});
+
+  //std::cout << self << "\n";
+  std::cout << std::string(insts.begin(), insts.end()) << "\n";
+
+  script::Method& method = mod->get_method("forward");
+  auto& ivalues = method.initial_ivalues();
+
+  size_t total_size =  ivalues.size() + 1;
+
+  for(size_t j = 0; j < 100; ++j) {
+    constexpr double TIMES = 1000.0;
+    // traditional argument spec
+    {
+      size_t b = torch::autograd::profiler::getTime();
+      size_t hash = 0;
+      for(size_t i = 0; i < TIMES; ++i)
+        hash += traditionalArgSpec(ivalues, input,total_size);
+
+      size_t e = torch::autograd::profiler::getTime();
+      std::cout << (e - b) / TIMES << " <- orig " << hash << "\n";
+    }
+
+    // traditional argument spec
+    {
+      size_t b = torch::autograd::profiler::getTime();
+      size_t hash = 0;
+      for(size_t i = 0; i < TIMES; ++i)
+        hash += newArgSpec(insts, self, input, total_size);
+
+      size_t e = torch::autograd::profiler::getTime();
+      std::cout << (e - b) / TIMES << "  <- new " << hash << "\n";
+    }
+    // traditional argument spec
+    // {
+    //   size_t b = torch::autograd::profiler::getTime();
+    //   size_t hash = 0;
+    //   for(size_t i = 0; i < TIMES; ++i)
+    //     hash += newArgSpec2(insts, self, input, total_size);
+    //
+    //   size_t e = torch::autograd::profiler::getTime();
+    //   std::cout << (e - b) / TIMES << "  <- new2 " << hash << "\n";
+    // }
+  }
+
+}
+
 } // namespace test
 } // namespace jit
 } // namespace torch

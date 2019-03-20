@@ -7336,6 +7336,7 @@ a")
 
         self.assertEqual(output_orig, output_import)
         self.assertEqual(grad_orig, grad_import)
+        m_orig.save("whatisthis.pt")
 
     @skipIfNoTorchVision
     def test_script_module_script_resnet(self):

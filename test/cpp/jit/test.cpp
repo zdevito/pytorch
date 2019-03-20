@@ -28,6 +28,7 @@ using namespace torch::jit::test;
 namespace torch {
 namespace jit {
 #define TH_FORALL_TESTS(_)         \
+  _(ArgSpec) \
   _(ADFormulas)                    \
   _(Attributes)                    \
   _(Blocks)                        \
@@ -58,6 +59,7 @@ namespace jit {
   _(ATenNativeBatchNorm)           \
   _(NoneSchemaMatch)               \
   _(ClassParser)
+
 
 #define TH_FORALL_TESTS_CUDA(_) \
   _(ArgumentSpec)               \
