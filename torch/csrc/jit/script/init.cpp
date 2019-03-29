@@ -61,7 +61,7 @@ inline std::shared_ptr<SugaredValue> toSimple(Value* v) {
 // type, *add it in this function's implementation*.
 std::shared_ptr<SugaredValue> toSugaredValue(
     py::object obj,
-    Method& m,
+    Function& m,
     SourceRange loc,
     bool is_constant = false,
     bool is_submodule = false);
@@ -122,7 +122,7 @@ struct VISIBILITY_HIDDEN PythonValue : public SugaredValue {
   // call it like a function, e.g. `outputs = this(inputs)`
   std::shared_ptr<SugaredValue> call(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       at::ArrayRef<NamedValue> inputs_,
       at::ArrayRef<NamedValue> attributes,
       size_t n_binders) override {
@@ -179,7 +179,7 @@ struct VISIBILITY_HIDDEN PythonValue : public SugaredValue {
 
   std::vector<std::shared_ptr<SugaredValue>> asTuple(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const c10::optional<size_t>& size_hint = {}) override {
     const std::string type_str = typeString(self);
     std::stringstream ss;
@@ -190,7 +190,7 @@ struct VISIBILITY_HIDDEN PythonValue : public SugaredValue {
 
   std::shared_ptr<SugaredValue> attr(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const std::string& field) override {
     const std::string type_str = typeString(self);
     std::stringstream ss;
@@ -216,7 +216,7 @@ struct VISIBILITY_HIDDEN PythonModuleValue : public PythonValue {
 
   std::shared_ptr<SugaredValue> attr(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const std::string& field) override {
     py::object member = getattr(loc, field);
     // note: is_constant = true because we consider that global properties
@@ -231,7 +231,7 @@ struct VISIBILITY_HIDDEN ConstantPythonTupleValue : public PythonValue {
       : PythonValue(std::move(tup)) {}
   std::vector<std::shared_ptr<SugaredValue>> asTuple(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const c10::optional<size_t>& size_hint = {}) override {
     py::tuple tup = self;
     std::vector<std::shared_ptr<SugaredValue>> result;
@@ -243,7 +243,7 @@ struct VISIBILITY_HIDDEN ConstantPythonTupleValue : public PythonValue {
     return result;
   }
 
-  Value* asValue(const SourceRange& loc, Method& m) override {
+  Value* asValue(const SourceRange& loc, Function& m) override {
     std::vector<Value*> values;
     for (const auto& sugared_item : asTuple(loc, m)) {
       values.push_back(sugared_item->asValue(loc, m));
@@ -255,8 +255,9 @@ struct VISIBILITY_HIDDEN ConstantPythonTupleValue : public PythonValue {
 
 // Represents all the parameters of a module as a List[Tensor]
 struct VISIBILITY_HIDDEN ConstantParameterList : public SugaredValue {
-  ConstantParameterList(std::shared_ptr<Module> module)
-      : module_(std::move(module)) {}
+  ConstantParameterList(Value* self, std::shared_ptr<Module> module)
+      : self_(self),
+        module_(std::move(module)) {}
 
   std::string kind() const override {
     return "constant parameter list";
@@ -264,24 +265,25 @@ struct VISIBILITY_HIDDEN ConstantParameterList : public SugaredValue {
 
   std::shared_ptr<SugaredValue> call(
       const SourceRange& loc,
-      Method& caller,
+      Function& caller,
       at::ArrayRef<NamedValue> inputs,
       at::ArrayRef<NamedValue> attributes,
       size_t n_binders) override {
+    Graph& g = *caller.graph();
     // Add all module parameters as inputs to the graph
     std::vector<Value*> params;
     const auto& param_list = module_->get_parameters();
     for (auto it = param_list.rbegin(); it != param_list.rend(); ++it) {
       auto& param = *it;
-      params.push_back(caller.get_or_add_parameter(param));
+      params.emplace_back(g.insertGetAttr(self_, param.name()));
     }
-    auto list = caller.graph()->createList(TensorType::get(), params);
-    caller.graph()->insertNode(list);
+    auto list = g.insertNode(g.createList(TensorType::get(), params));
     return toSimple(list->output());
   }
 
  private:
-  std::shared_ptr<Module> module_;
+   Value* self_;
+   std::shared_ptr<Module> module_;
 };
 
 // defines how modules/methods behave inside the script subset.
@@ -291,8 +293,9 @@ struct VISIBILITY_HIDDEN ConstantParameterList : public SugaredValue {
 // anticipating we will eventually need to replace Module with a py::object
 // holding the actual nn.Module class.
 
-struct ModuleValue : public SugaredValue {
-  ModuleValue(std::shared_ptr<Module> module) : module(std::move(module)) {}
+struct ModuleValue : public SimpleValue {
+  ModuleValue(Value* self, std::shared_ptr<Module> module)
+  : SimpleValue(self), module(std::move(module)) {}
 
   std::string kind() const override {
     return "module";
@@ -301,7 +304,7 @@ struct ModuleValue : public SugaredValue {
   // select an attribute on it, e.g. `this.field`
   std::shared_ptr<SugaredValue> attr(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const std::string& field) override {
     // workaround to make self.training work
     // it adds a buffer 'training' to the model if one doesn't exist
@@ -316,20 +319,16 @@ struct ModuleValue : public SugaredValue {
         module->register_buffer("training", std::move(t));
         v = module->find_buffer(field);
       }
-      Value* the_tensor = m.get_or_add_parameter(*v);
+      Value* the_tensor = m.graph()->insertGetAttr(getValue(), "training");
       Value* the_bool = m.graph()->insert(prim::Bool, {the_tensor});
       return std::make_shared<SimpleValue>(the_bool);
     }
 
     if (std::shared_ptr<Module> v = module->find_module(field)) {
       return std::make_shared<ModuleValue>(v);
-    } else if (Method* v = module->find_method(field)) {
-      return std::make_shared<MethodValue>(shared_from_this(), *v);
-    } else if (Slot* v = module->find_parameter(field)) {
-      return std::make_shared<SimpleValue>(m.get_or_add_parameter(*v));
-    } else if (Slot* v = module->find_attribute(field)) {
-      return std::make_shared<SimpleValue>(
-          m.get_or_add_attribute(*v));
+    } else if (auto kind = module->kind_of(field)) {
+      // methods, parameters, attributes, and buffers are all first class
+      return SimpleValue::attr(loc, m, field);
     }
 
     // This can also be a call to a non-script module, or a plain
@@ -361,7 +360,7 @@ struct ModuleValue : public SugaredValue {
   // call module.forward
   std::shared_ptr<SugaredValue> call(
       const SourceRange& loc,
-      Method& caller,
+      Function& caller,
       at::ArrayRef<NamedValue> inputs,
       at::ArrayRef<NamedValue> attributes,
       size_t n_binders) override {
@@ -371,7 +370,7 @@ struct ModuleValue : public SugaredValue {
 
   std::vector<std::shared_ptr<SugaredValue>> asTuple(
       const SourceRange& loc,
-      Method& m,
+      Function& m,
       const c10::optional<size_t>& size_hint = {}) override {
     py::object py_module = py::cast(module);
     if (!py::isinstance(
@@ -392,6 +391,7 @@ struct ModuleValue : public SugaredValue {
   }
 
  private:
+  Value* self;
   std::shared_ptr<Module> module;
 };
 
@@ -405,7 +405,7 @@ struct VISIBILITY_HIDDEN BooleanDispatchValue : public SugaredValue {
 
   std::shared_ptr<SugaredValue> call(
       const SourceRange& loc,
-      Method& caller,
+      Function& caller,
       at::ArrayRef<NamedValue> inputs,
       at::ArrayRef<NamedValue> attributes,
       size_t n_binders) override {
@@ -453,7 +453,7 @@ struct VISIBILITY_HIDDEN OverloadedFunctionValue : public SugaredValue {
 
   std::shared_ptr<SugaredValue> call(
       const SourceRange& loc,
-      Method& caller,
+      Function& caller,
       at::ArrayRef<NamedValue> inputs,
       at::ArrayRef<NamedValue> attributes,
       size_t n_binders) override {
@@ -462,7 +462,7 @@ struct VISIBILITY_HIDDEN OverloadedFunctionValue : public SugaredValue {
         py::cast<std::vector<py::object>>(possible_functions_);
 
     for (const py::object& fn : possible_functions) {
-      auto& method = py::cast<Method&>(fn);
+      auto& method = py::cast<Function&>(fn);
       auto match = tryMatchSchema(
           method.getSchema(),
           loc,
@@ -487,7 +487,7 @@ struct VISIBILITY_HIDDEN OverloadedFunctionValue : public SugaredValue {
 
 std::shared_ptr<SugaredValue> toSugaredValue(
     py::object obj,
-    Method& m,
+    Function& m,
     SourceRange loc,
     bool is_constant,
     bool is_submodule) {
@@ -618,7 +618,7 @@ static void gatherParametersAndBuffers(
 namespace {
 
 Resolver pythonResolver(const ResolutionCallback& rcb) {
-  return [rcb](const std::string& name, Method& m, const SourceRange& loc)
+  return [rcb](const std::string& name, Function& m, const SourceRange& loc)
              -> std::shared_ptr<SugaredValue> {
     AutoGIL ag;
     py::object obj = rcb(name);
@@ -670,6 +670,13 @@ FunctionSchema getSchemaWithNameAndDefaults(
       schema.is_varret());
 }
 
+static Self moduleValue(std::shared_ptr<Module> m) {
+  return [m](Value* v) {
+    v->setType(m->module_object()->type());
+    return std::make_shared<ModuleValue>(v, m);
+  };
+}
+
 void initJitScriptBindings(PyObject* module) {
   auto m = py::handle(module).cast<py::module>();
 
@@ -709,9 +716,11 @@ void initJitScriptBindings(PyObject* module) {
              bool has_self) {
             c10::optional<Self> self;
             if (has_self) {
-              self = Self(std::make_shared<ModuleValue>(m));
+              m->class_compilation_unit().define(
+                script, pythonResolver(rcb), moduleValue(m));
+            } else {
+              m->lowered_methods().define(script, pythonResolver(rcb), nullptr);
             }
-            defineMethodsInModule(m, script, pythonResolver(rcb), self);
           })
       .def(
           "_create_methods",
@@ -724,14 +733,14 @@ void initJitScriptBindings(PyObject* module) {
             for (auto& callback : rcbs) {
               resolvers.push_back(pythonResolver(callback));
             }
-            defineMethodsInModule(
-                m, defs, resolvers, Self(std::make_shared<ModuleValue>(m)));
+            m->class_compilation_unit().define(
+              defs, resolvers, moduleValue(m));
 
             // Stitch in default arguments for each Def if provided
             auto defaults_it = defaults.begin();
             auto defs_it = defs.begin();
             while (defs_it != defs.end()) {
-              auto& method = m->get_method((*defs_it).name().name());
+              auto& method = m->class_compilation_unit().get_function((*defs_it).name().name());
               method.setSchema(getSchemaWithNameAndDefaults(
                   defs_it->range(),
                   method.getSchema(),
@@ -832,7 +841,7 @@ void initJitScriptBindings(PyObject* module) {
           [](Module& self,
              const std::string& name,
              std::shared_ptr<Graph> graph) {
-            self.create_method(name, std::move(graph), {});
+            self.lowered_methods().create_function(name, std::move(graph));
           })
       .def(
           "_create_method_from_trace",
@@ -856,7 +865,7 @@ void initJitScriptBindings(PyObject* module) {
                 var_lookup_fn,
                 force_outplace,
                 input_tuple.size());
-            self->create_method(name, std::move(graph), std::move(parameters));
+            self->create_method_from_trace(name, std::move(graph), std::move(parameters));
             didFinishEmitModule(self);
           })
       .def(
@@ -881,7 +890,7 @@ void initJitScriptBindings(PyObject* module) {
           [](Module& self) {
             if (self.find_method("forward")) {
               Method& m = self.get_method("forward");
-              return m.getDebugState();
+              return m.get_executor().getDebugState();
             }
             throw std::runtime_error(
                 "Attempted to call get_debug_state on a Module without a compiled forward()");
@@ -891,7 +900,7 @@ void initJitScriptBindings(PyObject* module) {
           [](Module& self) {
             if (self.find_method("forward")) {
               Method& m = self.get_method("forward");
-              m.debugDisableAutodiffSubgraphInlining();
+              m.get_executor().debugDisableAutodiffSubgraphInlining();
             }
           })
       .def(
@@ -949,7 +958,7 @@ void initJitScriptBindings(PyObject* module) {
             }
 
             Method* orig_method = orig->find_method(name);
-            m->create_method(name, orig_method->graph()->copy(), member_inputs);
+            m->create_method_from_trace(name, orig_method->graph()->copy(), member_inputs);
           });
 
   py::class_<Method>(m, "ScriptMethod", py::dynamic_attr())
@@ -963,10 +972,14 @@ void initJitScriptBindings(PyObject* module) {
                 method, tuple_slice(std::move(args), 1), std::move(kwargs));
           })
       .def_property_readonly("graph", [](Method& m) { return m.graph(); })
-      .def("propagate_shapes", &Method::propagate_shapes)
+      .def("propagate_shapes", [](Method& m, const std::vector<at::Tensor> &inputs, bool with_grad) {
+        return propagate_shapes(*m.graph(), inputs, m.initial_ivalues(), with_grad);
+      })
       .def(
           "propagate_and_assign_input_and_output_shapes",
-          &Method::propagate_and_assign_input_and_output_shapes)
+         [](Method& m, const std::vector<at::Tensor> &inputs, std::vector<at::Tensor> outputs, bool with_grad, bool propagate) {
+           return propagate_and_assign_input_and_output_shapes(*m.graph(), inputs, m.initial_ivalues(), outputs, with_grad, propagate);
+         })
       .def(
           "initial_ivalues",
           [](Method& m) {

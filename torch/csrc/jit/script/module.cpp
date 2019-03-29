@@ -15,28 +15,26 @@ void placeholderCreator(Method&) {
   throw RecursiveMethodCallError();
 }
 
-Value* try_emit_call_to(
+Value* Function::try_emit_call(
     Graph& graph,
     const SourceRange& loc,
-    Method& callee,
     c10::optional<NamedValue> self,
     ArrayRef<NamedValue> args,
     ArrayRef<NamedValue> kwargs,
     std::stringstream& failure_messages,
-    Method* caller,
     bool conv_tensors_to_nums) {
   try {
-    callee.ensure_defined();
+    ensure_defined();
   } catch (RecursiveMethodCallError&) {
     throw ErrorReport(loc)
-        << " method '" << callee.name()
+        << " method '" << name()
         << "' is called recursively involving this call site. "
         << "Recursive calls are not supported";
   }
-  auto fn = callee.graph();
+  auto fn = this->graph();
 
   auto matched_schema = tryMatchSchema(
-      callee.getSchema(),
+      getSchema(),
       loc,
       graph,
       std::move(self),
@@ -47,52 +45,28 @@ Value* try_emit_call_to(
   if (!matched_schema)
     return nullptr;
 
-  // parameters to callee method (which become parameters to _this_ method
-  // if they were not already)
-  for (const auto& member : callee.initial_ivalues()) {
-    if (!caller) {
-      throw ErrorReport(loc)
-          << " attempting to call a method with parameters/attributes"
-             " from a raw graph. File a bug report";
-    }
-    // TODO: preserve the type information so we don't have to infer it here
-    auto type = incompleteInferTypeFrom(member.value());
-    matched_schema->inputs.push_back(
-        caller->get_or_add_attribute(member));
-  }
-  callee.check_single_output();
-  return inlineCallTo(graph, *callee.graph(), matched_schema->inputs).at(0);
+  check_single_output();
+  return inlineCallTo(graph, *fn, matched_schema->inputs).at(0);
 }
 
-Value* Method::emit_call_to(
+Value* Function::emit_call(
+    Graph& graph,
     const SourceRange& loc,
-    Method& callee,
     ArrayRef<NamedValue> args,
     ArrayRef<NamedValue> kwargs) {
-  AT_ASSERT(!executor);
+  AT_ASSERT(!executor_);
   std::stringstream failure_messages;
-  if (auto result = try_emit_call_to(
-          *graph(),
+  if (auto result = try_emit_call(
+          graph,
           loc,
-          callee,
           c10::nullopt,
           args,
           kwargs,
           failure_messages,
-          this,
           /*conv_tensors_to_nums=*/true)) {
     return result;
   }
   throw ErrorReport(loc) << failure_messages.str();
-}
-
-void Method::ensure_defined() {
-  if (method_creator) {
-    auto creator = method_creator;
-    method_creator = placeholderCreator;
-    creator(*this);
-    method_creator = nullptr;
-  }
 }
 
 void Module::to(at::Device device, at::ScalarType dtype, bool non_blocking) {

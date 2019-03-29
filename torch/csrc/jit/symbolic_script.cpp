@@ -928,8 +928,8 @@ bool isHelperFunction(const std::string& method_name) {
   return method_name.compare(0, helper_prefix.length(), helper_prefix) == 0;
 }
 
-void loadModule(const std::shared_ptr<script::Module>& module) {
-  for (const auto& method : module->get_methods()) {
+void loadModule(const script::CompilationUnit& module) {
+  for (const auto& method : module.get_functions()) {
     if (isHelperFunction(method->name()))
       continue;
 
@@ -981,9 +981,8 @@ void loadModule(const std::shared_ptr<script::Module>& module) {
 
 void loadFunctions() {
   for (const std::string& str : functions) {
-    auto cu = std::make_shared<script::Module>();
-    script::defineMethodsInModule(
-        cu, str, script::nativeResolver, c10::nullopt);
+    script::CompilationUnit cu;
+    cu.define(str, script::nativeResolver, nullptr);
     loadModule(cu);
   }
 }
