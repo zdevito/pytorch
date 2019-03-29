@@ -736,20 +736,20 @@ def script(obj, optimize=True, _frames_up=0, _rcb=None):
         return obj
     if _rcb is None:
         _rcb = _jit_internal.createResolutionCallback(_frames_up + 1)
-    mod = ScriptModule()
     if inspect.isclass(obj):
         if not _is_new_style_class(obj):
             raise RuntimeError("TorchScript classes must be new-style classes. Please inherit from 'object'")
         ast = get_jit_class_def(obj)
-        _jit_script_class_compile(mod, ast, _rcb)
+        _jit_script_class_compile(ast, _rcb)
         _add_script_class(obj, obj.__name__)
         return obj
     else:
+        mod = ScriptModule()
         ast = get_jit_def(obj)
         _jit_script_compile(mod, ast, _rcb, get_default_args(obj))
-    # Forward docstrings
-    mod.__doc__ = obj.__doc__
-    return mod
+        # Forward docstrings
+        mod.__doc__ = obj.__doc__
+        return mod
 
 
 ScriptMethodStub = namedtuple('ScriptMethodStub', ('resolution_callback', 'def_', 'original_method'))
