@@ -1,7 +1,7 @@
 import torch
 import functools
 import warnings
-import numpy as np
+# import numpy as np
 from torch._six import container_abcs, string_classes
 
 

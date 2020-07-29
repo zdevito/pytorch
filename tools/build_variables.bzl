@@ -340,6 +340,7 @@ libtorch_cuda_sources = [
     "torch/csrc/jit/codegen/cuda/utils.cpp",
     "torch/csrc/jit/codegen/cuda/register_interface.cpp",
     "torch/csrc/jit/tensorexpr/cuda_codegen.cpp",
+    "torch/csrc/CudaIPCTypes.cpp",
 ]
 
 torch_cpp_srcs = [
@@ -414,7 +415,6 @@ libtorch_python_cuda_sources = [
 ]
 
 libtorch_python_core_sources = [
-    "torch/csrc/CudaIPCTypes.cpp",
     "torch/csrc/DataLoader.cpp",
     "torch/csrc/Device.cpp",
     "torch/csrc/Dtype.cpp",
@@ -507,7 +507,6 @@ libtorch_python_distributed_sources = [
     "torch/csrc/distributed/rpc/testing/init.cpp",
     "torch/csrc/distributed/rpc/unpickled_python_call.cpp",
     "torch/csrc/distributed/rpc/unpickled_python_remote_call.cpp",
-    "torch/csrc/jit/runtime/register_distributed_ops.cpp",
 ]
 
 def glob_libtorch_python_sources():

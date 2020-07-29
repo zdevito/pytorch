@@ -50,6 +50,7 @@ using OperationCreator = Operation (*)(const Node*);
 // An Operator is a thin wrapper around either a pure JIT operator (e.g. prim
 // ops) or a c10 operator, allowing some common operations and abstracting away
 // the concrete operator nature.
+
 struct TORCH_API Operator {
  private:
   struct C10Operator final {

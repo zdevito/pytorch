@@ -70,7 +70,7 @@ class TestBackend : public PyTorchBackendInterface {
 };
 
 namespace {
-static auto cls = torch::jit::backend<TestBackend>("test_backend");
+// static auto cls = torch::jit::backend<TestBackend>("test_backend");
 }
 
 } // namespace jit

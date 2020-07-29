@@ -78,10 +78,10 @@ c10::AliasAnalysisKind aliasAnalysisIsSpecialCase() {
   return AliasAnalysisKind::INTERNAL_SPECIAL_CASE;
 }
 
-RegisterOperators reg({Operator(
-    prim::PythonOp,
-    createPythonOperation,
-    aliasAnalysisIsSpecialCase())});
+// RegisterOperators reg({Operator(
+//     prim::PythonOp,
+//     createPythonOperation,
+//     aliasAnalysisIsSpecialCase())});
 
 } // namespace
 } // namespace jit
