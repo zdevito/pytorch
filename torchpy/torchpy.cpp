@@ -1,53 +1,30 @@
-#include <torchpy.h>
-#include <assert.h>
-#include <pybind11/embed.h>
-#include <stdio.h>
-#include <torch/csrc/autograd/generated/variable_factories.h>
-#include <torch/csrc/jit/python/pybind_utils.h>
-#include <iostream>
-#include <memory>
-#include <mutex>
-#include <thread>
-#include "interpreter.h"
+#include "torchpy.h"
 
-namespace torchpy {
+namespace torch {
 
-std::vector<std::shared_ptr<Interpreter>> interpreters;
-std::mutex interpreters_mtx;
-size_t num_interpreters = 4;
+Package InterpreterManager::load_package(const std::string& uri) {
+  return Package(uri, this);
+}
 
-void init() {
-  for (size_t i = 0; i < num_interpreters; i++) {
-    interpreters.push_back(std::make_shared<Interpreter>());
+InterpreterSession MovableObject::acquire_session(
+    const Interpreter* on_this_interpreter) {
+  InterpreterSession I = on_this_interpreter
+      ? on_this_interpreter->acquire_session()
+      : package_->package_manager_->acquire_one();
+  I.self =
+      I.impl_->unpickle_or_get(object_id_, package_->container_file_, data_);
+  return I;
+}
+void MovableObject::unload(const Interpreter* on_this_interpreter) {
+  if (!on_this_interpreter) {
+    for (auto& interp : package_->package_manager_->all_instances()) {
+      unload(&interp);
+    }
+    return;
   }
+
+  InterpreterSession I = on_this_interpreter->acquire_session();
+  I.impl_->unload(object_id_);
 }
 
-void finalize() {
-  interpreters.clear();
-}
-
-size_t load(const char* filename, bool hermetic) {
-  // for now just load all models into all interpreters
-  // eventually, we'll share/dedup tensor data
-  size_t model_id;
-  for (auto interp : interpreters) {
-    model_id = interp->load_model(filename, hermetic);
-  }
-  return model_id;
-}
-
-at::Tensor forward(size_t model_id, at::Tensor input) {
-  interpreters_mtx.lock();
-  auto interp = interpreters.back();
-  interpreters.pop_back();
-  interpreters_mtx.unlock();
-
-  at::Tensor output = interp->forward_model(model_id, input);
-
-  interpreters_mtx.lock();
-  interpreters.push_back(interp);
-  interpreters_mtx.unlock();
-
-  return output;
-}
-} // namespace torchpy
+} // namespace torch

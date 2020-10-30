@@ -7,27 +7,35 @@
 #include <torch/torch.h>
 #include <torchpy.h>
 
-void compare_torchpy_jit(const char* model_filename, at::Tensor input) {
+void compare_torchpy_jit(const char* model_filename) {
   // Test
-  auto model_id = torchpy::load(model_filename);
-  at::Tensor output = torchpy::forward(model_id, input);
+  std::ostringstream pkg;
+  pkg << "torchpy/example/generated/" << model_filename;
+  std::ostringstream jit;
+  jit << "torchpy/example/generated/" << model_filename << "_jit";
+  torch::InterpreterManager m(1);
+  torch::Package p = m.load_package(pkg.str());
+  auto model = p.load_pickle("model", "model.pkl");
+  at::IValue eg;
+  {
+    auto I = p.acquire_session();
+    eg = I.self.attr("load_pickle")({"model", "example.pkl"}).toIValue();
+  }
+
+  at::Tensor output = model(eg.toTuple()->elements()).toTensor();
 
   // Reference
-  auto ref_model = torch::jit::load(model_filename);
-  std::vector<torch::jit::IValue> ref_inputs;
-  ref_inputs.push_back(torch::jit::IValue(input));
-  at::Tensor ref_output = ref_model.forward(ref_inputs).toTensor();
+  auto ref_model = torch::jit::load(jit.str());
+  at::Tensor ref_output =
+      ref_model.forward(eg.toTuple()->elements()).toTensor();
 
-  ASSERT_TRUE(ref_output.equal(output));
+  ASSERT_TRUE(ref_output.allclose(output, 1e-03, 1e-05));
 }
 
 TEST(TorchpyTest, SimpleModel) {
-  compare_torchpy_jit(
-      "torchpy/example/generated/simple.pt", torch::ones(at::IntArrayRef({10, 20})));
+  compare_torchpy_jit("simple");
 }
 
 TEST(TorchpyTest, ResNet) {
-  compare_torchpy_jit(
-      "torchpy/example/generated/resnet.pt",
-      torch::ones(at::IntArrayRef({1, 3, 224, 224})));
+  compare_torchpy_jit("resnet");
 }

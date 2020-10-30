@@ -859,3 +859,78 @@ def _load(zip_file, map_location, pickle_module, pickle_file='data.pkl', **pickl
 
 def _is_torchscript_zip(zip_file):
     return 'constants.pkl' in zip_file.get_all_records()
+
+
+
+
+def _create_pickler(self, data_buf, importers):
+    def _import_module(self, module_name):
+        last_err = None
+        for import_module in importers:
+            try:
+                return import_module(module_name)
+            except ModuleNotFoundError as err:
+                last_err = err
+
+        if last_err is not None:
+            raise last_err
+        else:
+            raise ModuleNotFoundError(module_name)
+
+    if importers == [importlib.import_module]:
+        # if we are using the normal import library system, then
+        # we can use the C implementation of pickle which is faster
+        return pickle.Pickler(data_buf, protocol=3)
+    else:
+        return CustomImportPickler(self._import_module, data_buf, protocol=3)
+
+def _save_storages(importer, obj):
+    serialized_storages = []
+    serialized_dtypes = []
+    def persistent_id(obj):
+        # FIXME: the docs say that persistent_id should only return a string
+        # but torch store returns tuples. This works only in the binary protocol
+        # see
+        # https://docs.python.org/2/library/pickle.html#pickling-and-unpickling-external-objects
+        # https://github.com/python/cpython/blob/master/Lib/pickle.py#L527-L537
+        if torch.is_storage(obj):
+            serialized_storages.append(obj)
+            serialized_dtypes.append(obj.dtype)
+            return ('storage', len(serialized_storages) - 1)
+        return None
+
+    # Write the pickle data for `obj`
+    data_buf = io.BytesIO()
+    from torch.package._custom_import_pickler import create_custom_import_pickler
+    import importlib
+    pickler = create_custom_import_pickler(data_buf, [importer.import_module, importlib.import_module])
+    pickler.persistent_id = persistent_id
+    pickler.dump(obj)
+    data_value = data_buf.getvalue()
+    return data_value, serialized_storages, serialized_dtypes
+
+def _load_storages(id, zip_reader, obj_bytes, serialized_storages):
+
+    def persistent_load(saved_id):
+        assert isinstance(saved_id, tuple)
+        typename = _maybe_decode_ascii(saved_id[0])
+        data = saved_id[1:]
+
+        assert typename == 'storage', \
+            f"Unknown typename for persistent_load, expected 'storage' but got '{typename}'"
+        return serialized_storages[data[0]]
+
+    unpickler = get_package(zip_reader).Unpickler(io.BytesIO(obj_bytes))
+    unpickler.persistent_load = persistent_load
+    result = objects[id] = unpickler.load()
+    return result
+
+def get_package(zip_reader):
+    if zip_reader not in raw_packages:
+        from torch.package import PackageImporter
+        raw_packages[zip_reader] = PackageImporter(zip_reader)
+    return raw_packages[zip_reader]
+
+
+raw_packages = {}
+objects = {}

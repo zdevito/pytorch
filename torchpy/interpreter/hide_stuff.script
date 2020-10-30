@@ -1,0 +1,4 @@
+STUFF_TO_HIDE {
+    global: new_interpreter_impl;
+    local: *;
+};

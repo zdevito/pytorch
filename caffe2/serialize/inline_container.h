@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <istream>
+#include <mutex>
 #include <ostream>
 
 #include <c10/core/Allocator.h>
@@ -182,6 +183,7 @@ class CAFFE2_API PyTorchStreamReader final {
   std::string archive_name_plus_slash_;
   std::unique_ptr<ReadAdapterInterface> in_;
   int64_t version_;
+  std::mutex reader_lock_;
 };
 
 class CAFFE2_API PyTorchStreamWriter final {

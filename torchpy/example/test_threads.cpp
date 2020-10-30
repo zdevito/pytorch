@@ -6,25 +6,22 @@
 #include <future>
 
 TEST(TorchpyTest, MultiSerialSimpleModel) {
-  auto model_filename = "torchpy/example/generated/simple.pt";
-  auto input = torch::ones(at::IntArrayRef({10, 20}));
+  torch::InterpreterManager manager(3);
+  torch::Package p = manager.load_package("torchpy/example/generated/simple");
+  auto model = p.load_pickle("model", "model.pkl");
+  auto ref_model = torch::jit::load("torchpy/example/generated/simple_jit");
+
+  auto input = torch::ones({10, 20});
   size_t ninterp = 3;
   std::vector<at::Tensor> outputs;
 
-  // Shared model
-  auto model_id = torchpy::load(model_filename);
-
   // Futures on model forward
   for (size_t i = 0; i < ninterp; i++) {
-    auto output = torchpy::forward(model_id, input);
-    outputs.push_back(output);
+    outputs.push_back(model({input}).toTensor());
   }
 
   // Generate reference
-  auto ref_model = torch::jit::load(model_filename);
-  std::vector<torch::jit::IValue> ref_inputs;
-  ref_inputs.push_back(torch::jit::IValue(input));
-  auto ref_output = ref_model.forward(ref_inputs).toTensor();
+  auto ref_output = ref_model.forward({input}).toTensor();
 
   // Compare all to reference
   for (size_t i = 0; i < ninterp; i++) {
@@ -33,20 +30,27 @@ TEST(TorchpyTest, MultiSerialSimpleModel) {
 }
 
 TEST(TorchpyTest, ThreadedSimpleModel) {
-  auto model_filename = "torchpy/example/generated/simple.pt";
-  size_t nthreads = 2;
+  size_t nthreads = 3;
+  torch::InterpreterManager manager(nthreads);
+
+  torch::Package p = manager.load_package("torchpy/example/generated/simple");
+  auto model = p.load_pickle("model", "model.pkl");
+  auto ref_model = torch::jit::load("torchpy/example/generated/simple_jit");
+
+  auto input = torch::ones({10, 20});
+
   std::vector<at::Tensor> outputs;
-  auto input = torch::ones(at::IntArrayRef({10, 20}));
 
-  // Shared model
-  auto model_id = torchpy::load(model_filename);
-
+  // Futures on model forward
   // Futures on model forward
   std::vector<std::future<at::Tensor>> futures;
   for (size_t i = 0; i < nthreads; i++) {
-    futures.push_back(std::async(std::launch::async, [model_id]() {
-      auto input = torch::ones(at::IntArrayRef({10, 20}));
-      auto result = torchpy::forward(model_id, input);
+    futures.push_back(std::async(std::launch::async, [&model]() {
+      auto input = torch::ones({10, 20});
+      for (int i = 0; i < 100; ++i) {
+        model({input}).toTensor();
+      }
+      auto result = model({input}).toTensor();
       return result;
     }));
   }
@@ -55,25 +59,10 @@ TEST(TorchpyTest, ThreadedSimpleModel) {
   }
 
   // Generate reference
-  auto ref_model = torch::jit::load(model_filename);
-  std::vector<torch::jit::IValue> ref_inputs;
-  ref_inputs.push_back(torch::jit::IValue(input));
-  auto ref_output = ref_model.forward(ref_inputs).toTensor();
+  auto ref_output = ref_model.forward({input}).toTensor();
 
   // Compare all to reference
   for (size_t i = 0; i < nthreads; i++) {
     ASSERT_TRUE(ref_output.equal(outputs[i]));
   }
-}
-
-TEST(TorchpyTest, Hermetic) {
-  auto model_filename = "torchpy/example/generated/resnet.zip";
-  unsigned long model_id;
-
-  model_id = torchpy::load(model_filename, true);
-  auto input =
-      torch::ones(at::IntArrayRef({1, 3, 224, 224}));
-      // TODO errors will segfault due to races
-  // auto input = torch::ones(at::IntArrayRef({10, 20}));
-    auto result = torchpy::forward(model_id, input);
 }

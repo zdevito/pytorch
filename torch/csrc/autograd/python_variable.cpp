@@ -47,6 +47,23 @@ static const char* VOLATILE_WARNING =
     "volatile was removed and now has no effect. Use "
     "`with torch.no_grad():` instead.";
 
+static std::unordered_map<void*, PyObject*> impl_to_pyobj;
+
+void set_pyobj(const Variable& self, PyObject* pyobj) {
+  TORCH_CHECK(self.defined(), "cannot call set_pyobj() on undefined tensor");
+  void* key = self.unsafeGetTensorImpl();
+  if (!pyobj) {
+    impl_to_pyobj.erase(key);
+  }
+  impl_to_pyobj[key] = pyobj;
+}
+
+PyObject* pyobj(const Variable& self) {
+  TORCH_CHECK(self.defined(), "cannot call pyobj() on undefined tensor");
+  return impl_to_pyobj[self.unsafeGetTensorImpl()]; // if it doesn't exist yet
+                                                    // this returns null
+}
+
 // Creates a new Python object for a Variable. The Variable must not already
 // have a PyObject* associated with it.
 static PyObject* THPVariable_NewWithVar(PyTypeObject* type, Variable var)
@@ -55,7 +72,7 @@ static PyObject* THPVariable_NewWithVar(PyTypeObject* type, Variable var)
   if (obj) {
     auto v = (THPVariable*) obj;
     new (&v->cdata) Variable(std::move(var));
-    torch::autograd::impl::set_pyobj(v->cdata, obj);
+    set_pyobj(v->cdata, obj);
   }
   return obj;
 }
@@ -66,7 +83,7 @@ PyObject * THPVariable_Wrap(Variable var)
     Py_RETURN_NONE;
   }
 
-  if (auto obj = torch::autograd::impl::pyobj(var)) {
+  if (auto obj = pyobj(var)) {
     Py_INCREF(obj);
     return obj;
   }
@@ -121,7 +138,7 @@ static int THPVariable_clear(THPVariable *self)
     // objects stay live, buster!  See
     // https://github.com/pytorch/pytorch/issues/22884 for an example of
     // this actually showing up.
-    torch::autograd::impl::set_pyobj(self->cdata, nullptr);
+    set_pyobj(self->cdata, nullptr);
   }
   self->cdata.reset();
   return 0;

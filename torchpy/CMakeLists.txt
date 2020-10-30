@@ -8,7 +8,7 @@ set(TORCHPY_LIB_SOURCES
 add_library(torchpy ${TORCHPY_LIB_SOURCES})
 target_include_directories(torchpy PRIVATE ${TORCHPY_DIR} ${INTERPRETER_DIR})
 target_link_libraries(torchpy PRIVATE torch)
-target_link_libraries(torchpy PUBLIC shm)
+target_link_libraries(torchpy PUBLIC shm dl)
 
 set(TORCHPY_TEST_SOURCES
   ${TORCHPY_DIR}/test_main.cpp
@@ -20,12 +20,12 @@ target_include_directories(torchpy_test PRIVATE ${TORCHPY_DIR})
 target_link_libraries(torchpy_test PRIVATE torchpy torch)
 target_link_libraries(torchpy_test PUBLIC gtest)
 
-set(TORCHPY_APP_SOURCES
-  ${TORCHPY_DIR}/app_main.cpp
-)
-add_executable(torchpy_app ${TORCHPY_APP_SOURCES})
-target_include_directories(torchpy_app  PRIVATE ${TORCHPY_DIR})
-target_link_libraries(torchpy_app PRIVATE dl)
+
+target_include_directories(torchpy_test PRIVATE ${TORCHPY_DIR})
+
+add_executable(torchpy_app torchpy_app.cpp)
+
+target_link_libraries(torchpy_app PRIVATE torchpy torch)
 
 add_library(ctype ${TORCHPY_DIR}/libctype.c)
 target_compile_options(ctype PRIVATE -fPIC)

@@ -52,7 +52,7 @@ add_custom_command(
 # Build the interpreter lib, designed to be standalone and dlopened
 # We bake the python and torch_python binding objs into libinterpreter
 set(INTERPRETER_LIB_SOURCES
-  ${INTERPRETER_DIR}/interpreter.cpp
+  ${INTERPRETER_DIR}/interpreter_impl.cpp
   ${FROZEN_FILES}
   ${PYTHON_MODULES}
   # ${CMAKE_CURRENT_BINARY_DIR}/../../c10/CMakeFiles/c10.dir/core/TensorImpl.cpp.o
@@ -69,6 +69,7 @@ target_link_libraries(interpreter PRIVATE crypt crypto ssl pthread dl util m ffi
 # target_link_libraries(interpreter PRIVATE -Wl,--static c10d)
 target_link_libraries(interpreter PRIVATE fmt::fmt-header-only)
 target_link_libraries(interpreter PRIVATE torch_python_static)
+target_link_libraries(interpreter PRIVATE -Wl,--version-script=${INTERPRETER_DIR}/hide_stuff.script)
 
 # handy to have a standalone app to verify linkage and usage of interpreter before embedding it in another lib
 set(INTERPRETER_TEST_SOURCES
@@ -78,11 +79,3 @@ add_executable(interpreter_test ${INTERPRETER_TEST_SOURCES})
 target_include_directories(interpreter_test PRIVATE ${INTERPRETER_DIR})
 target_link_libraries(interpreter_test PUBLIC gtest dl shm torch)
 target_link_libraries(interpreter_test PUBLIC protobuf::libprotobuf-lite)
-
-set(INTERPRETER_APP_SOURCES
-  ${INTERPRETER_DIR}/app_main.cpp
-)
-add_executable(interpreter_app ${INTERPRETER_APP_SOURCES})
-target_include_directories(interpreter_app PRIVATE ${INTERPRETER_DIR})
-target_link_libraries(interpreter_app PUBLIC dl shm torch)
-target_link_libraries(interpreter_app PUBLIC protobuf::libprotobuf-lite)
