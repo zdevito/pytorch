@@ -18,6 +18,8 @@
 
 #include <torch/script.h>
 
+#include <Python.h>
+
 typedef void (*function_type)(const char*);
 
 constexpr auto latency_p = {
@@ -207,6 +209,8 @@ struct Benchmark {
 };
 
 int main(int argc, char* argv[]) {
+  // make sure things work even when python exists in the main app
+  Py_Initialize();
   torch::InterpreterManager manager(40);
   auto n_threads = {1, 2, 4, 8, 16, 32, 40};
   Report::report_header(std::cout);

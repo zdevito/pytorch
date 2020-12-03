@@ -26,6 +26,7 @@ target_include_directories(torchpy_test PRIVATE ${TORCHPY_DIR})
 add_executable(torchpy_app torchpy_app.cpp)
 
 target_link_libraries(torchpy_app PRIVATE torchpy torch)
+target_link_libraries(torchpy_app PRIVATE /private/home/zdevito/miniconda3/envs/py38/lib/libpython3.8.so)
 
 add_library(ctype ${TORCHPY_DIR}/libctype.c)
 target_compile_options(ctype PRIVATE -fPIC)
