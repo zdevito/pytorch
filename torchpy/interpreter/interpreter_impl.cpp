@@ -124,6 +124,8 @@ class F:
 sys.meta_path.insert(0, F())
 # make loader importable
 import torch # has to be done serially otherwise things will segfault
+import warnings
+warnings.simplefilter("ignore")
 )RAW";
 
 const char* sysprint = R"RAW(

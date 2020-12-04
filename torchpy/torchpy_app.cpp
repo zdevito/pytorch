@@ -61,7 +61,7 @@ struct Report {
   }
 };
 
-const int min_items_to_complete = 100;
+const int min_items_to_complete = 1;
 
 struct Benchmark {
   Benchmark(
@@ -91,7 +91,8 @@ struct Benchmark {
     std::vector<at::IValue> eg;
     {
       auto I = package.acquire_session();
-      eg = I.self.attr("load_pickle")({"model", "example.pkl"})
+
+      eg = I.global("builtins", "tuple")(I.self.attr("load_pickle")({"model", "example.pkl"}))
                .toIValue()
                .toTuple()
                ->elements();

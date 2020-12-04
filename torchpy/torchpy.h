@@ -151,6 +151,10 @@ struct InterpreterManager {
       : resources_(n_interp) {
     for (size_t i = 0; i < n_interp; ++i) {
       instances_.emplace_back();
+      auto I = instances_.back().acquire_session();
+      // make torch.version.interp be the interpreter id
+      // can be used for balancing work across GPUs
+      I.global("torch", "version").attr("__setattr__")({"interp", int64_t(i)});
     }
   }
   // get a free model, guarenteed that no other user of acquire_one has the same
