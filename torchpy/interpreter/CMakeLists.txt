@@ -41,11 +41,13 @@ list(APPEND PACKAGES_TO_FREEZE ${PYTORCH_ROOT}/torch)
 # typing_extensions (needed by torch)
 list(APPEND PACKAGES_TO_FREEZE ${INTERPRETER_DIR}/third_party/typing/typing_extensions/src_py3/typing_extensions.py)
 
+file(GLOB_RECURSE PACKAGE_FILES ${PYTHON_SOURCE_DIR}/Lib/*.py ${PYTORCH_ROOT}/torch/*.py ${INTERPRETER_DIR}/third_party/typing/typing_extensions/src_py3/typing_extensions.py)
+
 add_custom_command(
    OUTPUT ${FROZEN_FILES}
    WORKING_DIRECTORY ${INTERPRETER_DIR}
    COMMAND ${PYTHON_BIN} freeze.py ${PACKAGES_TO_FREEZE} --verbose
-   DEPENDS ${PYTHON_BIN}
+   DEPENDS ${PYTHON_BIN} ${PACKAGE_FILES}
    VERBATIM
 )
 

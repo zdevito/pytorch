@@ -114,7 +114,7 @@ extern struct _frozen _PyImport_FrozenModules[];
 const char* startup = R"RAW(
 import sys
 # Remove the path-based importer, as we don't want our isolated interpreter to read the file system
-sys.meta_path = sys.meta_path[:-1]
+# sys.meta_path = sys.meta_path[:-1]
 
 class F:
     def find_spec(self, fullname, path, target=None):
@@ -123,23 +123,21 @@ class F:
         return None
 sys.meta_path.insert(0, F())
 # make loader importable
+
+import sys
+# print("exec_prefix:", sys.base_exec_prefix)
+# print("_base_executable:", sys._base_executable)
+# print("base_prefix:", sys.base_prefix)
+# print("exec_prefix:", sys.exec_prefix)
+# print("executable:", sys.executable)
+# print("path:", sys.path)
+# print("prefix:", sys.prefix)
+
 import torch # has to be done serially otherwise things will segfault
+torch.rand(1).cuda() # for cuda init...
 import warnings
 warnings.simplefilter("ignore")
 )RAW";
-
-const char* sysprint = R"RAW(
-import sys
-print("exec_prefix:", sys.base_exec_prefix)
-print("_base_executable:", sys._base_executable)
-print("base_prefix:", sys.base_prefix)
-print("exec_prefix:", sys.exec_prefix)
-print("executable:", sys.executable)
-print("path:", sys.path)
-print("prefix:", sys.prefix)
-
-)RAW";
-
 
 static std::atomic<size_t> s_id;
 std::map<size_t, py::object> forwards;
@@ -226,15 +224,14 @@ struct ConcreteInterpreterImpl : public torch::InterpreterImpl {
     status = PyConfig_SetString(&config, &config.executable, L"i_am_torchpy");
     status = PyConfig_SetString(&config, &config.prefix, L"");
     config.module_search_paths_set = 1;
-    wchar_t* module_search_paths[0] = {};
+    wchar_t* module_search_paths[1] = {L"."};
     status = PyConfig_SetWideStringList(
-        &config, &config.module_search_paths, 0, module_search_paths);
+        &config, &config.module_search_paths, 1, module_search_paths);
 
     status = Py_InitializeFromConfig(&config);
     PyConfig_Clear(&config);
     TORCH_INTERNAL_ASSERT(!PyStatus_Exception(status))
 
-    // PyRun_SimpleString(sysprint);
     PyRun_SimpleString(startup);
 
     // we cache these so we don't have to repeat the conversion of strings into

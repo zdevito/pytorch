@@ -887,6 +887,7 @@ def _create_pickler(self, data_buf, importers):
 def _save_storages(importer, obj):
     serialized_storages = []
     serialized_dtypes = []
+
     def persistent_id(obj):
         # FIXME: the docs say that persistent_id should only return a string
         # but torch store returns tuples. This works only in the binary protocol
@@ -920,7 +921,18 @@ def _load_storages(id, zip_reader, obj_bytes, serialized_storages):
             f"Unknown typename for persistent_load, expected 'storage' but got '{typename}'"
         return serialized_storages[data[0]]
 
-    unpickler = get_package(zip_reader).Unpickler(io.BytesIO(obj_bytes))
+    from torch.package.importer import _UnpicklerWrapper
+    import importlib
+
+    importer = get_package(zip_reader)
+
+    def import_module(name: str):
+        try:
+            return importer.import_module(name)
+        except ModuleNotFoundError:
+            return importlib.import_module(name)
+
+    unpickler = _UnpicklerWrapper(import_module, io.BytesIO(obj_bytes))
     unpickler.persistent_load = persistent_load
     result = objects[id] = unpickler.load()
     return result

@@ -92,7 +92,8 @@ struct Benchmark {
     {
       auto I = package.acquire_session();
 
-      eg = I.global("builtins", "tuple")(I.self.attr("load_pickle")({"model", "example.pkl"}))
+      eg = I.global("builtins", "tuple")(
+                I.self.attr("load_pickle")({"model", "example.pkl"}))
                .toIValue()
                .toTuple()
                ->elements();
@@ -115,17 +116,19 @@ struct Benchmark {
             const torch::Interpreter* i)
             : obj(std::move(a)), eg(b), interps(i) {}
         void operator()(int i) {
-          auto I = obj.acquire_session();
+          auto I = obj.acquire_session(&interps[i]);
           I.self(eg);
         }
         torch::MovableObject obj;
         std::vector<at::IValue>& eg;
         const torch::Interpreter* interps;
       };
+      auto mo = package.load([&](torch::InterpreterSession& I) {
+        auto obj = I.self.attr("load_pickle")({"model", "model.pkl"});
+        return I.global("gpu_wrapper", "GPUWrapper")({obj});
+      });
       run_one_work_item =
-          Run(package.load_pickle("model", "model.pkl"),
-              eg,
-              nullptr);
+          Run(std::move(mo), eg, manager_.all_instances().data());
     }
 
     std::vector<std::vector<double>> latencies(n_threads_);
@@ -222,7 +225,7 @@ int main(int argc, char* argv[]) {
       auto interpreter_strategy = {
           n_thread}; // {1, std::max<int>(1, n_thread / 2), n_thread};
       for (int n_interp : interpreter_strategy) {
-        for (bool jit : {false, true}) {
+        for (bool jit : {false}) {
           if (jit) {
             std::fstream jit_file(model_file + "_jit");
             if (!jit_file.good()) {

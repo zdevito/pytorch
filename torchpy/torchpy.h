@@ -53,7 +53,9 @@ class Interpreter {
     library_name_ = library_name;
     std::tmpnam(library_name);
     {
-      std::ifstream src("build/lib/libinterpreter.so", std::ios::binary);
+      std::ifstream src(
+          "/scratch/zdevito/pytorch/build/lib/libinterpreter.so",
+          std::ios::binary);
       std::ofstream dst(library_name, std::ios::binary);
       dst << src.rdbuf();
     }
@@ -154,7 +156,7 @@ struct InterpreterManager {
       auto I = instances_.back().acquire_session();
       // make torch.version.interp be the interpreter id
       // can be used for balancing work across GPUs
-      I.global("torch", "version").attr("__setattr__")({"interp", int64_t(i)});
+      I.global("torch", "version").attr("__setattr__")({"interp", int(i)});
     }
   }
   // get a free model, guarenteed that no other user of acquire_one has the same
