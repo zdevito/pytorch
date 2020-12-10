@@ -22,6 +22,8 @@
 
 typedef void (*function_type)(const char*);
 
+bool cuda = false;
+
 constexpr auto latency_p = {
     25.,
     50.,
@@ -63,6 +65,86 @@ struct Report {
 
 const int min_items_to_complete = 1;
 
+
+struct RunPython {
+  RunPython(torch::Package& package,
+      std::vector<at::IValue> eg,
+      const torch::Interpreter* interps)
+      : obj_(package.load([&](torch::InterpreterSession& I) {
+          auto obj = I.self.attr("load_pickle")({"model", "model.pkl"});
+          if (cuda) {
+            obj = I.global("gpu_wrapper", "GPUWrapper")({obj});
+          }
+          return obj;
+        })), eg_(std::move(eg)), interps_(interps) {}
+  void operator()(int i) {
+    auto I = obj_.acquire_session();
+    I.self(eg_);
+  }
+  torch::MovableObject obj_;
+  std::vector<at::IValue> eg_;
+  const torch::Interpreter* interps_;
+};
+
+// def to_device(i, d):
+//     if isinstance(i, torch.Tensor):
+//         return i.to(device=d)
+//     elif isinstance(i, (tuple, list)):
+//         return tuple(to_device(e, d) for e in i)
+//     else:
+//         raise RuntimeError('inputs are weird')
+
+static torch::IValue to_device(const torch::IValue& v, torch::Device to);
+
+static std::vector<torch::IValue> to_device_vec(at::ArrayRef<torch::IValue> vs, torch::Device to) {
+  std::vector<torch::IValue> results;
+  for (const torch::IValue& v: vs) {
+    results.push_back(to_device(v, to));
+  }
+  return results;
+}
+
+static torch::IValue to_device(const torch::IValue& v, torch::Device to) {
+  if (v.isTensor()) {
+    return v.toTensor().to(to);
+  } else if(v.isTuple()) {
+    auto tup = v.toTuple();
+    return c10::ivalue::Tuple::create(to_device_vec(tup->elements(), to));
+  } else if (v.isList()) {
+    TORCH_INTERNAL_ASSERT(false, "cannot to_device list");
+    //return to_device_vec(v.toListRef(), to);
+  } else {
+   TORCH_INTERNAL_ASSERT(false, "cannot to_device");
+  }
+}
+
+struct RunJIT {
+  RunJIT(const std::string& file_to_run, std::vector<torch::IValue> eg)
+  : eg_(std::move(eg)) {
+    if (!cuda) {
+      models_.push_back(torch::jit::load(file_to_run + "_jit"));
+    } else {
+      for (int i = 0; i < 2; ++i) {
+        auto loaded = torch::jit::load(file_to_run + "_jit");
+        loaded.to(torch::Device(torch::DeviceType::CUDA, i));
+        models_.push_back(loaded);
+      }
+    }
+  }
+  void operator()(int i) {
+    if (cuda) {
+      int device_id = i % models_.size();
+      auto d = torch::Device(torch::DeviceType::CUDA, device_id);
+      to_device(models_[device_id].forward(to_device_vec(eg_, d)), torch::DeviceType::CPU);
+    } else {
+      models_[0].forward(eg_);
+    }
+
+  }
+  std::vector<at::IValue> eg_;
+  std::vector<torch::jit::Module> models_;
+};
+
 struct Benchmark {
   Benchmark(
       torch::InterpreterManager& manager,
@@ -98,43 +180,19 @@ struct Benchmark {
                .toTuple()
                ->elements();
     }
-    for (at::IValue& iv : eg) {
-      if (iv.isTensor()) {
-        at::Tensor t = iv.toTensor();
-        t.unsafeGetTensorImpl()->pyobj();
-        ;
-      }
-    }
-    torch::jit::Module model_jit;
+
     if (jit_) {
-      model_jit = torch::jit::load(file_to_run_ + "_jit");
-      run_one_work_item = [&model_jit, &eg](int i) { model_jit.forward(eg); };
+      run_one_work_item = RunJIT(file_to_run_, std::move(eg));
     } else {
-      struct Run {
-        Run(torch::MovableObject a,
-            std::vector<at::IValue>& b,
-            const torch::Interpreter* i)
-            : obj(std::move(a)), eg(b), interps(i) {}
-        void operator()(int i) {
-          auto I = obj.acquire_session(&interps[i]);
-          I.self(eg);
-        }
-        torch::MovableObject obj;
-        std::vector<at::IValue>& eg;
-        const torch::Interpreter* interps;
-      };
-      auto mo = package.load([&](torch::InterpreterSession& I) {
-        auto obj = I.self.attr("load_pickle")({"model", "model.pkl"});
-        return I.global("gpu_wrapper", "GPUWrapper")({obj});
-      });
-      run_one_work_item =
-          Run(std::move(mo), eg, manager_.all_instances().data());
+      run_one_work_item = RunPython(package, std::move(eg), manager_.all_instances().data());
     }
+
 
     std::vector<std::vector<double>> latencies(n_threads_);
 
     for (size_t i = 0; i < n_threads_; ++i) {
       threads_.emplace_back([this, &latencies, i] {
+        torch::NoGradGuard guard;
         // do initial work
         run_one_work_item(i);
 
@@ -213,20 +271,29 @@ struct Benchmark {
 };
 
 int main(int argc, char* argv[]) {
+  int max_thread = atoi(argv[1]);
+  cuda = std::string(argv[2]) == "cuda";
+  bool jit_enable = std::string(argv[3]) == "jit";
   // make sure things work even when python exists in the main app
   Py_Initialize();
-  torch::InterpreterManager manager(40);
+  torch::InterpreterManager manager(max_thread);
   auto n_threads = {1, 2, 4, 8, 16, 32, 40};
   Report::report_header(std::cout);
-  for (int i = 1; i < argc; ++i) {
+  for (int i = 4; i < argc; ++i) {
     std::string model_file = argv[i];
     for (int n_thread : n_threads) {
+      if (n_thread > max_thread) {
+        continue;
+      }
       size_t prev = 0;
       auto interpreter_strategy = {
           n_thread}; // {1, std::max<int>(1, n_thread / 2), n_thread};
       for (int n_interp : interpreter_strategy) {
-        for (bool jit : {false}) {
+        for (bool jit : {false, true}) {
           if (jit) {
+            if (!jit_enable) {
+              continue;
+            }
             std::fstream jit_file(model_file + "_jit");
             if (!jit_file.good()) {
               continue; // no jit file present
