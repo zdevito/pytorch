@@ -107,6 +107,7 @@ FOREACH_LIBRARY(DECLARE_LIBRARY_INIT)
 #undef DECLARE_LIBRARY_INIT
 
 extern "C" PyObject* initModule(void);
+extern "C" PyObject* PyInit__C(void);
 extern struct _frozen _PyImport_FrozenModules[];
 
 // We need to register a custom finder because we are registering `torch._C` as
@@ -120,11 +121,20 @@ class F:
     def find_spec(self, fullname, path, target=None):
         if fullname == 'torch._C':
             return sys.meta_path[1].find_spec('torch._C', None, None)
+        elif fullname == 'maskrcnn_benchmark._C':
+            return sys.meta_path[1].find_spec('maskrcnn_benchmark._C', None, None)
         return None
 sys.meta_path.insert(0, F())
 # make loader importable
 
 import sys
+
+import importlib.machinery
+import importlib.util
+spec = importlib.machinery.ModuleSpec('maskrcnn_benchmark', None, is_package=True)  # type: ignore
+r = importlib.util.module_from_spec(spec)
+sys.modules['maskrcnn_benchmark'] = r
+
 # print("exec_prefix:", sys.base_exec_prefix)
 # print("_base_executable:", sys._base_executable)
 # print("base_prefix:", sys.base_prefix)
@@ -199,6 +209,7 @@ struct ConcreteInterpreterImpl : public torch::InterpreterImpl {
     FOREACH_LIBRARY(APPEND_INIT)
 #undef APPEND_INIT
     PyImport_AppendInittab("torch._C", initModule);
+    PyImport_AppendInittab("maskrcnn_benchmark._C", PyInit__C);
 
     int ret = extendFrozenModules(_PyImport_FrozenModules);
     TORCH_INTERNAL_ASSERT(ret == 0);

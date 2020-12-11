@@ -69,6 +69,21 @@ target_include_directories(interpreter PRIVATE ${INTERPRETER_DIR})
 target_link_libraries(interpreter PRIVATE -L${PYTHON_LIB_DIR} libpython3.8.a)
 target_link_libraries(interpreter PRIVATE crypt crypto ssl pthread dl util m ffi lzma readline nsl ncursesw panelw) # for python builtins
 # target_link_libraries(interpreter PRIVATE -Wl,--static c10d)
+
+target_link_libraries(interpreter PRIVATE
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/vision.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/SigmoidFocalLoss_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/nms.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/deform_conv_kernel_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/ROIPool_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/deform_pool_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/ROIAlign_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/deform_pool_kernel_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cuda/deform_conv_cuda.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cpu/nms_cpu.o
+/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/build/temp.linux-x86_64-3.8/scratch/zdevito/benchmark/torchbenchmark/models/maskrcnn_benchmark/maskrcnn_benchmark/csrc/cpu/ROIAlign_cpu.o
+)
+
 target_link_libraries(interpreter PRIVATE fmt::fmt-header-only)
 target_link_libraries(interpreter PRIVATE torch_python_static)
 target_link_libraries(interpreter PRIVATE -Wl,--version-script=${INTERPRETER_DIR}/hide_stuff.script)

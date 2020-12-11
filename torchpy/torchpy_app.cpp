@@ -65,9 +65,9 @@ struct Report {
 
 const int min_items_to_complete = 1;
 
-
 struct RunPython {
-  RunPython(torch::Package& package,
+  RunPython(
+      torch::Package& package,
       std::vector<at::IValue> eg,
       const torch::Interpreter* interps)
       : obj_(package.load([&](torch::InterpreterSession& I) {
@@ -76,7 +76,9 @@ struct RunPython {
             obj = I.global("gpu_wrapper", "GPUWrapper")({obj});
           }
           return obj;
-        })), eg_(std::move(eg)), interps_(interps) {}
+        })),
+        eg_(std::move(eg)),
+        interps_(interps) {}
   void operator()(int i) {
     auto I = obj_.acquire_session();
     I.self(eg_);
@@ -96,9 +98,11 @@ struct RunPython {
 
 static torch::IValue to_device(const torch::IValue& v, torch::Device to);
 
-static std::vector<torch::IValue> to_device_vec(at::ArrayRef<torch::IValue> vs, torch::Device to) {
+static std::vector<torch::IValue> to_device_vec(
+    at::ArrayRef<torch::IValue> vs,
+    torch::Device to) {
   std::vector<torch::IValue> results;
-  for (const torch::IValue& v: vs) {
+  for (const torch::IValue& v : vs) {
     results.push_back(to_device(v, to));
   }
   return results;
@@ -107,26 +111,38 @@ static std::vector<torch::IValue> to_device_vec(at::ArrayRef<torch::IValue> vs, 
 static torch::IValue to_device(const torch::IValue& v, torch::Device to) {
   if (v.isTensor()) {
     return v.toTensor().to(to);
-  } else if(v.isTuple()) {
+  } else if (v.isTuple()) {
     auto tup = v.toTuple();
     return c10::ivalue::Tuple::create(to_device_vec(tup->elements(), to));
   } else if (v.isList()) {
-    TORCH_INTERNAL_ASSERT(false, "cannot to_device list");
-    //return to_device_vec(v.toListRef(), to);
+    auto converted = to_device_vec(v.toListRef(), to);
+    torch::List<torch::IValue> result(v.toList().elementType());
+    for (const torch::IValue& v : converted) {
+      result.push_back(v);
+    }
+    return result;
   } else {
-   TORCH_INTERNAL_ASSERT(false, "cannot to_device");
+    TORCH_INTERNAL_ASSERT(false, "cannot to_device");
   }
+}
+
+static bool exists(const std::string& fname) {
+  std::fstream jit_file(fname);
+  return jit_file.good();
 }
 
 struct RunJIT {
   RunJIT(const std::string& file_to_run, std::vector<torch::IValue> eg)
-  : eg_(std::move(eg)) {
+      : eg_(std::move(eg)) {
     if (!cuda) {
       models_.push_back(torch::jit::load(file_to_run + "_jit"));
     } else {
       for (int i = 0; i < 2; ++i) {
-        auto loaded = torch::jit::load(file_to_run + "_jit");
-        loaded.to(torch::Device(torch::DeviceType::CUDA, i));
+        auto d = torch::Device(torch::DeviceType::CUDA, i);
+        std::stringstream qualified;
+        qualified << file_to_run << "_jit_" << i;
+        auto loaded = exists(qualified.str()) ? torch::jit::load(qualified.str(), d) : torch::jit::load(file_to_run + "_jit", d);
+        loaded.to(d);
         models_.push_back(loaded);
       }
     }
@@ -135,11 +151,12 @@ struct RunJIT {
     if (cuda) {
       int device_id = i % models_.size();
       auto d = torch::Device(torch::DeviceType::CUDA, device_id);
-      to_device(models_[device_id].forward(to_device_vec(eg_, d)), torch::DeviceType::CPU);
+      to_device(
+          models_[device_id].forward(to_device_vec(eg_, d)),
+          torch::DeviceType::CPU);
     } else {
       models_[0].forward(eg_);
     }
-
   }
   std::vector<at::IValue> eg_;
   std::vector<torch::jit::Module> models_;
@@ -184,9 +201,9 @@ struct Benchmark {
     if (jit_) {
       run_one_work_item = RunJIT(file_to_run_, std::move(eg));
     } else {
-      run_one_work_item = RunPython(package, std::move(eg), manager_.all_instances().data());
+      run_one_work_item =
+          RunPython(package, std::move(eg), manager_.all_instances().data());
     }
-
 
     std::vector<std::vector<double>> latencies(n_threads_);
 
@@ -294,9 +311,8 @@ int main(int argc, char* argv[]) {
             if (!jit_enable) {
               continue;
             }
-            std::fstream jit_file(model_file + "_jit");
-            if (!jit_file.good()) {
-              continue; // no jit file present
+            if(!exists(model_file + "_jit")) {
+              continue;
             }
           }
           Benchmark b(manager, n_thread, n_interp, model_file, jit);

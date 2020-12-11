@@ -13,9 +13,9 @@ class GPUWrapper(torch.nn.Module):
         super().__init__()
         self.root = root
         self.device = f'cuda:{torch.version.interp % torch.cuda.device_count()}'
-        self.stream = torch.cuda.Stream(self.device)
-        with torch.cuda.stream(self.stream):
-            self.root.to(device=self.device)
+        # self.stream = torch.cuda.Stream(self.device)
+        # with torch.cuda.stream(self.stream):
+        self.root.to(device=self.device)
 
     def __getstate__(self):
         return self.root
@@ -23,9 +23,9 @@ class GPUWrapper(torch.nn.Module):
     __setstate__ = __init__
 
     def forward(self, *args):
-        with torch.cuda.stream(self.stream):
-            iput = to_device(args, self.device)
-            return to_device(self.root(*iput), 'cpu')
+        # with torch.cuda.stream(self.stream):
+        iput = to_device(args, self.device)
+        return to_device(self.root(*iput), 'cpu')
 
 
 if __name__ == '__main__':
