@@ -199,6 +199,25 @@ struct ScopedAcquire {
   }
 };
 
+struct InitLockAcquire {
+  InitLockAcquire(std::mutex& init_lock) : init_lock_(init_lock) {
+    // to avoid deadlock, we need to ensure a consistent lock order:
+    // init_lock -> GIL. Otherwise, the GIL can be released by the python interpreter
+    // during initalization tasks, and then re-acquired. If another thread grabs the GIL
+    // to do non-initialization tasks, then it might start initializing (GIL -> init_lock).
+    // To avoid this, releasethe GIL before trying to get the init_lock and then reacquire it afterward.
+    PyEval_SaveThread();
+    init_lock.lock();
+    PyGILState_Ensure();
+  }
+  ~InitLockAcquire() {
+    init_lock_.unlock();
+  }
+
+ private:
+  std::mutex& init_lock_;
+};
+
 struct ConcreteInterpreterImpl : public torch::InterpreterImpl {
   ConcreteInterpreterImpl() {
     // some dependency in mkl requires this...
@@ -288,7 +307,7 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
     return wrap(torch::jit::toPyObject(value));
   }
   PythonObject create_or_get_package_importer_from_container_file(const std::shared_ptr<caffe2::serialize::PyTorchStreamReader>& container_file_) override {
-    std::lock_guard<std::mutex> guard(interp_->init_lock_);
+    InitLockAcquire guard(interp_->init_lock_);
     return wrap(interp_->get_package(container_file_));
   }
 
@@ -314,7 +333,7 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
       return wrap(objects[id_p]);
     }
 
-    std::lock_guard<std::mutex> guard(interp_->init_lock_);
+    InitLockAcquire guard(interp_->init_lock_);
 
     py::tuple storages(obj.storages_.size());
     for (size_t i = 0, N = obj.storages_.size(); i < N; ++i) {

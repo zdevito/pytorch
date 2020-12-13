@@ -1,4 +1,5 @@
 import torch
+from copy import deepcopy
 
 def to_device(i, d):
     if isinstance(i, torch.Tensor):
@@ -11,24 +12,32 @@ def to_device(i, d):
 class GPUWrapper(torch.nn.Module):
     def __init__(self, root):
         super().__init__()
-        self.root = root
-        self.device = f'cuda:{torch.version.interp % torch.cuda.device_count()}'
-        self.stream = torch.cuda.Stream(self.device)
-        with torch.cuda.stream(self.stream):
-            self.root.to(device=self.device)
+        self.models = []
+        for i in range(torch.cuda.device_count()):
+            m = deepcopy(root) if i != 0 else root
+            d = f'cuda:{i}'
+            s = torch.cuda.Stream(d)
+            m.to(device=d)
+            self.models.append((m, d, s))
 
     def __getstate__(self):
-        return self.root
+        return [(m, d) for m, d, _ in self.models]
 
-    __setstate__ = __init__
+    def __setstate__(self, models):
+        super().__init__()
+        self.models = []
+        for m, d in models:
+            torch.cuda.synchronize(d)
+            self.models.append((m, d, torch.cuda.Stream(d)))
 
     # roi_align, 2210 count, ROIAlign_cuda.cu: add threadsync: problem goes away, return rand problem goes away,
     # use different streams here, problem goes away.
-    def forward(self, *args):
+    def forward(self, tid, *args):
+        m, d, s = self.models[tid % len(self.models)]
 
-        with torch.cuda.stream(self.stream):
-            iput = to_device(args, self.device)
-            r = to_device(self.root(*iput), 'cpu')
+        with torch.cuda.stream(s):
+            iput = to_device(args, d)
+            r = to_device(m(*iput), 'cpu')
             return r
 
 

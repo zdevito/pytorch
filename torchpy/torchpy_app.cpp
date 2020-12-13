@@ -81,7 +81,13 @@ struct RunPython {
         interps_(interps) {}
   void operator()(int i) {
     auto I = obj_.acquire_session();
-    I.self(eg_);
+    if (cuda) {
+      std::vector<at::IValue> eg2 = {i};
+      eg2.insert(eg2.end(), eg_.begin(), eg_.end());
+      I.self(eg2);
+    } else {
+      I.self(eg_);
+    }
   }
   torch::MovableObject obj_;
   std::vector<at::IValue> eg_;
@@ -305,11 +311,16 @@ int main(int argc, char* argv[]) {
         continue;
       }
       size_t prev = 0;
-      auto interpreter_strategy = {
-          n_thread}; // {1, std::max<int>(1, n_thread / 2), n_thread};
+      std::vector<int> interpreter_strategy = {1, n_thread};
+      if (n_thread == 1) {
+        interpreter_strategy.pop_back();
+      }
       for (int n_interp : interpreter_strategy) {
         for (bool jit : {false, true}) {
           if (jit) {
+            if (n_interp != n_thread) {
+              continue; // setting unused for jit
+            }
             if (!jit_enable) {
               continue;
             }
