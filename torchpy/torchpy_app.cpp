@@ -141,7 +141,9 @@ struct RunJIT {
         auto d = torch::Device(torch::DeviceType::CUDA, i);
         std::stringstream qualified;
         qualified << file_to_run << "_jit_" << i;
-        auto loaded = exists(qualified.str()) ? torch::jit::load(qualified.str(), d) : torch::jit::load(file_to_run + "_jit", d);
+        auto loaded = exists(qualified.str())
+            ? torch::jit::load(qualified.str(), d)
+            : torch::jit::load(file_to_run + "_jit", d);
         loaded.to(d);
         models_.push_back(loaded);
       }
@@ -311,7 +313,7 @@ int main(int argc, char* argv[]) {
             if (!jit_enable) {
               continue;
             }
-            if(!exists(model_file + "_jit")) {
+            if (!exists(model_file + "_jit")) {
               continue;
             }
           }

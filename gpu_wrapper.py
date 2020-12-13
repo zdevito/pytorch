@@ -13,19 +13,23 @@ class GPUWrapper(torch.nn.Module):
         super().__init__()
         self.root = root
         self.device = f'cuda:{torch.version.interp % torch.cuda.device_count()}'
-        # self.stream = torch.cuda.Stream(self.device)
-        # with torch.cuda.stream(self.stream):
-        self.root.to(device=self.device)
+        self.stream = torch.cuda.Stream(self.device)
+        with torch.cuda.stream(self.stream):
+            self.root.to(device=self.device)
 
     def __getstate__(self):
         return self.root
 
     __setstate__ = __init__
 
+    # roi_align, 2210 count, ROIAlign_cuda.cu: add threadsync: problem goes away, return rand problem goes away,
+    # use different streams here, problem goes away.
     def forward(self, *args):
-        # with torch.cuda.stream(self.stream):
-        iput = to_device(args, self.device)
-        return to_device(self.root(*iput), 'cpu')
+
+        with torch.cuda.stream(self.stream):
+            iput = to_device(args, self.device)
+            r = to_device(self.root(*iput), 'cpu')
+            return r
 
 
 if __name__ == '__main__':
