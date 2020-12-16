@@ -202,10 +202,11 @@ struct ScopedAcquire {
 struct InitLockAcquire {
   InitLockAcquire(std::mutex& init_lock) : init_lock_(init_lock) {
     // to avoid deadlock, we need to ensure a consistent lock order:
-    // init_lock -> GIL. Otherwise, the GIL can be released by the python interpreter
-    // during initalization tasks, and then re-acquired. If another thread grabs the GIL
-    // to do non-initialization tasks, then it might start initializing (GIL -> init_lock).
-    // To avoid this, releasethe GIL before trying to get the init_lock and then reacquire it afterward.
+    // init_lock -> GIL. Otherwise, the GIL can be released by the python
+    // interpreter during initalization tasks, and then re-acquired. If another
+    // thread grabs the GIL to do non-initialization tasks, then it might start
+    // initializing (GIL -> init_lock). To avoid this, releasethe GIL before
+    // trying to get the init_lock and then reacquire it afterward.
     PyEval_SaveThread();
     init_lock.lock();
     PyGILState_Ensure();
@@ -334,6 +335,11 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
     }
 
     InitLockAcquire guard(interp_->init_lock_);
+    // re-check if something else loaded this before we acquired the
+    // init_lock_
+    if (objects.contains(id_p)) {
+      return wrap(objects[id_p]);
+    }
 
     py::tuple storages(obj.storages_.size());
     for (size_t i = 0, N = obj.storages_.size(); i < N; ++i) {

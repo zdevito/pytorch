@@ -13,28 +13,30 @@ class GPUWrapper(torch.nn.Module):
     def __init__(self, root):
         super().__init__()
         self.models = []
+        self.streams = {}
         for i in range(torch.cuda.device_count()):
             m = deepcopy(root) if i != 0 else root
             d = f'cuda:{i}'
-            s = torch.cuda.Stream(d)
             m.to(device=d)
-            self.models.append((m, d, s))
+            self.models.append((m, d))
 
     def __getstate__(self):
-        return [(m, d) for m, d, _ in self.models]
+        return self.models
 
     def __setstate__(self, models):
         super().__init__()
-        self.models = []
+        self.models = models
+        self.streams = {}
         for m, d in models:
             torch.cuda.synchronize(d)
-            self.models.append((m, d, torch.cuda.Stream(d)))
 
     # roi_align, 2210 count, ROIAlign_cuda.cu: add threadsync: problem goes away, return rand problem goes away,
     # use different streams here, problem goes away.
     def forward(self, tid, *args):
-        m, d, s = self.models[tid % len(self.models)]
-
+        m, d = self.models[tid % len(self.models)]
+        if tid not in self.streams:
+            self.streams[tid] = torch.cuda.Stream(d)
+        s = self.streams[tid]
         with torch.cuda.stream(s):
             iput = to_device(args, d)
             r = to_device(m(*iput), 'cpu')

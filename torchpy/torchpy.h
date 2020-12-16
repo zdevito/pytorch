@@ -157,6 +157,7 @@ struct InterpreterManager {
       // make torch.version.interp be the interpreter id
       // can be used for balancing work across GPUs
       I.global("torch", "version").attr("__setattr__")({"interp", int(i)});
+      std::cerr << "Interpreter " << i << " initialized\n";
     }
   }
   // get a free model, guarenteed that no other user of acquire_one has the same

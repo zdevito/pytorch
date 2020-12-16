@@ -31,30 +31,20 @@ constexpr auto latency_p = {
 
 struct Report {
   std::string benchmark;
-  bool jit;
+  std::string strategy;
   size_t n_threads;
-  size_t n_interp;
   size_t items_completed;
   double work_items_per_second;
   std::vector<double> latencies;
   static void report_header(std::ostream& out) {
-    out << "benchmark, jit, n_threads, interpreter_strategy, work_items_completed, work_items_per_second";
+    out << "benchmark, strategy, n_threads, work_items_completed, work_items_per_second";
     for (double l : latency_p) {
       out << ", p" << l << "_latency";
     }
     out << "\n";
   }
   void report(std::ostream& out) {
-    const char* it = nullptr;
-    if (n_interp == 1) {
-      it = "one_global_interpreter";
-    } else if (n_interp == n_threads) {
-      it = "one_interpreter_per_thread";
-    } else {
-      it = "one_intepreter_per_two_threads";
-    }
-
-    out << benchmark << ", " << jit << ", " << n_threads << ", " << it << ", "
+    out << benchmark << ", " << strategy << ", " << n_threads << ", "
         << items_completed << ", " << work_items_per_second;
     for (double l : latencies) {
       out << ", " << l;
@@ -174,20 +164,22 @@ struct Benchmark {
   Benchmark(
       torch::InterpreterManager& manager,
       size_t n_threads,
-      size_t n_interpreters,
+      std::string strategy,
       std::string file_to_run,
-      bool jit,
-      size_t n_seconds = 1)
+      size_t n_seconds = 5)
       : manager_(manager),
         n_threads_(n_threads),
-        n_interpreters_(n_interpreters),
         file_to_run_(file_to_run),
-        jit_(jit),
+        strategy_(strategy),
         n_seconds_(n_seconds),
         should_run_(true),
         items_completed_(0),
         reached_min_items_completed_(0) {
-    manager.debugLimitInterpreters(n_interpreters_);
+    if (strategy == "one_python") {
+      manager.debugLimitInterpreters(1);
+    } else if (strategy == "multi_python") {
+      manager.debugLimitInterpreters(n_threads_);
+    }
   }
 
   Report run() {
@@ -206,7 +198,7 @@ struct Benchmark {
                ->elements();
     }
 
-    if (jit_) {
+    if (strategy_ == "jit") {
       run_one_work_item = RunJIT(file_to_run_, std::move(eg));
     } else {
       run_one_work_item =
@@ -243,7 +235,7 @@ struct Benchmark {
     auto begin = std::chrono::steady_clock::now();
     auto try_stop_at = begin + std::chrono::seconds(n_seconds_);
     std::this_thread::sleep_until(try_stop_at);
-    for (int i = 0; reached_min_items_completed_ < n_interpreters_; ++i) {
+    for (int i = 0; reached_min_items_completed_ < n_threads_; ++i) {
       std::this_thread::sleep_until(begin + (i+ 2)*std::chrono::seconds(n_seconds_));
     }
     should_run_ = false;
@@ -254,8 +246,7 @@ struct Benchmark {
     double total_seconds = std::chrono::duration<double>(end - begin).count();
     Report report;
     report.benchmark = file_to_run_;
-    report.jit = jit_;
-    report.n_interp = n_interpreters_;
+    report.strategy = strategy_;
     report.n_threads = n_threads_;
     report.items_completed = items_completed_;
     report.work_items_per_second = items_completed_ / total_seconds;
@@ -283,9 +274,8 @@ struct Benchmark {
   }
   torch::InterpreterManager& manager_;
   size_t n_threads_;
-  size_t n_interpreters_;
+  std::string strategy_;
   std::string file_to_run_;
-  bool jit_;
   size_t n_seconds_;
   pthread_barrier_t first_run_;
   std::atomic<bool> should_run_;
@@ -301,26 +291,17 @@ int main(int argc, char* argv[]) {
   bool jit_enable = std::string(argv[3]) == "jit";
   // make sure things work even when python exists in the main app
   Py_Initialize();
+  Report::report_header(std::cout);
   torch::InterpreterManager manager(max_thread);
   auto n_threads = {1, 2, 4, 8, 16, 32, 40};
-  Report::report_header(std::cout);
   for (int i = 4; i < argc; ++i) {
     std::string model_file = argv[i];
     for (int n_thread : n_threads) {
       if (n_thread > max_thread) {
         continue;
       }
-      size_t prev = 0;
-      std::vector<int> interpreter_strategy = {1, n_thread};
-      if (n_thread == 1) {
-        interpreter_strategy.pop_back();
-      }
-      for (int n_interp : interpreter_strategy) {
-        for (bool jit : {false, true}) {
-          if (jit) {
-            if (n_interp != n_thread) {
-              continue; // setting unused for jit
-            }
+      for (std::string strategy : {"one_python", "multi_python", "jit"}) {
+          if (strategy == "jit") {
             if (!jit_enable) {
               continue;
             }
@@ -328,14 +309,11 @@ int main(int argc, char* argv[]) {
               continue;
             }
           }
-          Benchmark b(manager, n_thread, n_interp, model_file, jit);
+          Benchmark b(manager, n_thread, strategy, model_file);
           Report r = b.run();
-          prev = n_interp;
           r.report(std::cout);
-        }
       }
     }
   }
-
   return 0;
 }
