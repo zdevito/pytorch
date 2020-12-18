@@ -41,7 +41,7 @@ struct Report {
     for (double l : latency_p) {
       out << ", p" << l << "_latency";
     }
-    out << "\n";
+    out << ", device\n";
   }
   void report(std::ostream& out) {
     out << benchmark << ", " << strategy << ", " << n_threads << ", "
@@ -49,7 +49,7 @@ struct Report {
     for (double l : latencies) {
       out << ", " << l;
     }
-    out << "\n";
+    out << ", " << (cuda ? "cuda" : "cpu") << "\n";
   }
 };
 
@@ -301,17 +301,17 @@ int main(int argc, char* argv[]) {
         continue;
       }
       for (std::string strategy : {"one_python", "multi_python", "jit"}) {
-          if (strategy == "jit") {
-            if (!jit_enable) {
-              continue;
-            }
-            if (!exists(model_file + "_jit")) {
-              continue;
-            }
+        if (strategy == "jit") {
+          if (!jit_enable) {
+            continue;
           }
-          Benchmark b(manager, n_thread, strategy, model_file);
-          Report r = b.run();
-          r.report(std::cout);
+          if (!exists(model_file + "_jit")) {
+            continue;
+          }
+        }
+        Benchmark b(manager, n_thread, strategy, model_file);
+        Report r = b.run();
+        r.report(std::cout);
       }
     }
   }

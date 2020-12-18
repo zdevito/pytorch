@@ -904,11 +904,16 @@ def _save_storages(importer, obj):
     data_buf = io.BytesIO()
     from torch.package._custom_import_pickler import create_custom_import_pickler
     import importlib
-    pickler = create_custom_import_pickler(data_buf, [importer.import_module, importlib.import_module])
+    importer = importer if isinstance(importer, torch.package.PackageImporter) else None
+    if importer is not None:
+        importers = [importer.import_module, importlib.import_module]
+    else:
+        importers = [importlib.import_module]
+    pickler = create_custom_import_pickler(data_buf, importers)
     pickler.persistent_id = persistent_id
     pickler.dump(obj)
     data_value = data_buf.getvalue()
-    return data_value, serialized_storages, serialized_dtypes
+    return data_value, serialized_storages, serialized_dtypes, importer.zip_reader if importer else None
 
 def _load_storages(id, zip_reader, obj_bytes, serialized_storages):
 
@@ -924,13 +929,15 @@ def _load_storages(id, zip_reader, obj_bytes, serialized_storages):
     from torch.package.importer import _UnpicklerWrapper
     import importlib
 
-    importer = get_package(zip_reader)
+    import_module = importlib.import_module
+    if zip_reader is not None:
+        importer = get_package(zip_reader)
 
-    def import_module(name: str):
-        try:
-            return importer.import_module(name)
-        except ModuleNotFoundError:
-            return importlib.import_module(name)
+        def import_module(name: str):
+            try:
+                return importer.import_module(name)
+            except ModuleNotFoundError:
+                return importlib.import_module(name)
 
     unpickler = _UnpicklerWrapper(import_module, io.BytesIO(obj_bytes))
     unpickler.persistent_load = persistent_load

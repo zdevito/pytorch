@@ -317,6 +317,9 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
     py::bytes bytes = py::cast<py::bytes>(result[0]);
     py::list storages = py::cast<py::list>(result[1]);
     py::list dtypes = py::cast<py::list>(result[2]);
+    auto container_file =
+        py::cast<std::shared_ptr<caffe2::serialize::PyTorchStreamReader>>(
+            result[3]);
 
     std::vector<at::Storage> storages_c;
     std::vector<at::ScalarType> dtypes_c;
@@ -325,9 +328,12 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
       dtypes_c.push_back(
           reinterpret_cast<THPDtype*>(dtypes[i].ptr())->scalar_type);
     }
-    return PickledObject{bytes, std::move(storages_c), std::move(dtypes_c)};
+    return PickledObject{bytes,
+                         std::move(storages_c),
+                         std::move(dtypes_c),
+                         std::move(container_file)};
   }
-  PythonObject unpickle_or_get(int64_t id, const std::shared_ptr<caffe2::serialize::PyTorchStreamReader>& container_file, const PickledObject& obj) override {
+  PythonObject unpickle_or_get(int64_t id, const PickledObject& obj) override {
     py::dict objects = interp_->objects;
     py::object id_p = py::cast(id);
     if (objects.contains(id_p)) {
@@ -349,7 +355,7 @@ struct ConcreteInterpreterSessionImpl : public torch::InterpreterSessionImpl {
       storages[i] = std::move(new_storage);
     }
     py::object result = interp_->load_storage(
-        id, container_file, py::bytes(obj.data_), storages);
+        id, obj.container_file_, py::bytes(obj.data_), storages);
     return wrap(result);
   }
   void unload(int64_t id) override {

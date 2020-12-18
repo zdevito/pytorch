@@ -10,14 +10,13 @@ InterpreterSession MovableObject::acquire_session(
     const Interpreter* on_this_interpreter) {
   InterpreterSession I = on_this_interpreter
       ? on_this_interpreter->acquire_session()
-      : package_->package_manager_->acquire_one();
-  I.self =
-      I.impl_->unpickle_or_get(object_id_, package_->container_file_, data_);
+      : manager_->acquire_one();
+  I.self = I.impl_->unpickle_or_get(object_id_, data_);
   return I;
 }
 void MovableObject::unload(const Interpreter* on_this_interpreter) {
   if (!on_this_interpreter) {
-    for (auto& interp : package_->package_manager_->all_instances()) {
+    for (auto& interp : manager_->all_instances()) {
       unload(&interp);
     }
     return;

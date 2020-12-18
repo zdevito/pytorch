@@ -14,6 +14,7 @@ struct PickledObject {
   // types for the storages, required to
   // reconstruct correct Python storages
   std::vector<at::ScalarType> types_;
+  std::shared_ptr<caffe2::serialize::PyTorchStreamReader> container_file_;
 };
 
 
@@ -47,7 +48,9 @@ struct InterpreterSessionImpl {
   virtual PythonObject create_or_get_package_importer_from_container_file(const std::shared_ptr<caffe2::serialize::PyTorchStreamReader>& container_file_) = 0;
 
   virtual PickledObject pickle(PythonObject container, PythonObject obj)  = 0;
-  virtual PythonObject unpickle_or_get(int64_t id, const std::shared_ptr<caffe2::serialize::PyTorchStreamReader>& container_file, const PickledObject& obj) = 0;
+  virtual PythonObject unpickle_or_get(
+      int64_t id,
+      const PickledObject& obj) = 0;
   virtual void unload(int64_t id) = 0;
 
   virtual at::IValue toIValue(PythonObject obj) const = 0;

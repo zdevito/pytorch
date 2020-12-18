@@ -202,11 +202,14 @@ struct MovableObject {
 
  private:
   friend struct Package;
-  MovableObject(size_t object_id, PickledObject data, Package* package)
-  : object_id_(object_id), data_(data), package_(package) {}
+  MovableObject(
+      size_t object_id,
+      PickledObject data,
+      InterpreterManager* manager)
+      : object_id_(object_id), data_(data), manager_(manager) {}
   int64_t object_id_;
   PickledObject data_;
-  Package* package_;
+  InterpreterManager* manager_;
 };
 
 struct Package {
@@ -214,7 +217,8 @@ struct Package {
     auto I = acquire_session();
     auto loaded = ctor(I);
     auto pickled = I.impl_->pickle(I.self, loaded);
-    return MovableObject(package_manager_->next_object_id_++, std::move(pickled), this);
+    return MovableObject(
+        manager_->next_object_id_++, std::move(pickled), manager_);
   }
   // shorthand for getting the object as a pickle resource in the package
   MovableObject load_pickle(const std::string& module, const std::string& file) {
@@ -224,7 +228,7 @@ struct Package {
   }
 
   InterpreterSession acquire_session() {
-    auto I = package_manager_->acquire_one();
+    auto I = manager_->acquire_one();
     I.self = I.impl_->create_or_get_package_importer_from_container_file(
         container_file_);
     return I;
@@ -235,12 +239,12 @@ private:
      const std::string& uri,
      InterpreterManager*
          pm) // or really any of the constructors to our zip file format
-     : package_manager_(pm),
+     : manager_(pm),
        container_file_(
            std::make_shared<caffe2::serialize::PyTorchStreamReader>(uri)) {}
  friend struct MovableObject;
  friend struct InterpreterManager;
- InterpreterManager* package_manager_;
+ InterpreterManager* manager_;
  std::shared_ptr<caffe2::serialize::PyTorchStreamReader> container_file_;
 };
 
