@@ -12,16 +12,16 @@
 
 namespace torch {
 
+struct MovableObject;
+struct InterpreterManager;
 
 struct InterpreterSession {
-  InterpreterSession(InterpreterSessionImpl* impl, std::function<void(void)> notify_complete)
-  : impl_(impl), notify_complete_(std::move(notify_complete)) {}
+  InterpreterSession(InterpreterSessionImpl* impl, InterpreterManager* manager)
+  : impl_(impl), manager_(manager) {}
 
   PythonObject self; // when retreived from a PythonMovable this will be set.
   InterpreterSession(InterpreterSession&&) = default;
-  ~InterpreterSession() {
-    notify_complete_();
-  }
+  ~InterpreterSession();
   PythonObject global(const char* module, const char* name) {
     return impl_->global(module, name);
   }
@@ -29,11 +29,14 @@ struct InterpreterSession {
       return impl_->from_ivalue(std::move(ivalue));
   }
 
+  MovableObject create_movable(PythonObject obj);
 private:
   friend struct MovableObject;
   friend struct Package;
+  friend struct InterpreterManager;
   std::unique_ptr<InterpreterSessionImpl> impl_;
-  std::function<void(void)> notify_complete_;
+  InterpreterManager* manager_; // if created from one
+  int64_t notify_idx_ = -1;
 };
 
 
@@ -47,8 +50,11 @@ class Interpreter {
   void* handle_;
   std::unique_ptr<InterpreterImpl> pImpl_;
 
+  InterpreterManager* manager_; // optional if managed by one
+
  public:
-  Interpreter() : handle_(nullptr) {
+  Interpreter(InterpreterManager* manager)
+  : handle_(nullptr), manager_(manager) {
     char library_name[L_tmpnam];
     library_name_ = library_name;
     std::tmpnam(library_name);
@@ -74,9 +80,8 @@ class Interpreter {
     assert(new_interpreter_impl);
     pImpl_ = std::unique_ptr<InterpreterImpl>(((InterpreterImpl*(*)(void)) new_interpreter_impl)());
   }
-  InterpreterSession acquire_session(
-      std::function<void(void)> notify_complete = noop) const {
-    return InterpreterSession(pImpl_->acquire_session(), std::move(notify_complete));
+  InterpreterSession acquire_session() const {
+    return InterpreterSession(pImpl_->acquire_session(), manager_);
   }
   ~Interpreter() {
     if (handle_) {
@@ -91,13 +96,15 @@ class Interpreter {
   Interpreter(Interpreter&& rhs)
       : library_name_(std::move(rhs.library_name_)),
         handle_(rhs.handle_),
-        pImpl_(std::move(rhs.pImpl_)) {
+        pImpl_(std::move(rhs.pImpl_)),
+        manager_(rhs.manager_) {
     rhs.handle_ = nullptr;
   }
 
   Interpreter(const Interpreter&) = delete;
   Interpreter& operator=(const Interpreter&) = delete;
   Interpreter& operator=(Interpreter&&) = delete;
+  friend struct InterpreterManager;
 };
 
 struct Package;
@@ -152,7 +159,7 @@ struct InterpreterManager {
   InterpreterManager(size_t n_interp = 2)
       : resources_(n_interp) {
     for (size_t i = 0; i < n_interp; ++i) {
-      instances_.emplace_back();
+      instances_.emplace_back(this);
       auto I = instances_.back().acquire_session();
       // make torch.version.interp be the interpreter id
       // can be used for balancing work across GPUs
@@ -164,9 +171,9 @@ struct InterpreterManager {
   // model. It _is_ possible that other users will be using the interpreter.
   InterpreterSession acquire_one() {
     int where = resources_.acquire();
-    return instances_[where].acquire_session([this, where] {
-      resources_.free(where);
-    });
+    InterpreterSession I = instances_[where].acquire_session();
+    I.notify_idx_ = where;
+    return I;
   }
 
   // use to make sure something gets run on all interpreters, such as loading or
@@ -182,6 +189,7 @@ struct InterpreterManager {
   InterpreterManager(const InterpreterManager&) = delete;
  private:
   friend struct Package;
+  friend struct InterpreterSession;
   size_t next_object_id_ = 0;
   std::vector<Interpreter> instances_;
   LoadBalancer resources_;
@@ -202,6 +210,7 @@ struct MovableObject {
 
  private:
   friend struct Package;
+  friend struct InterpreterSession;
   MovableObject(
       size_t object_id,
       PickledObject data,
@@ -213,18 +222,11 @@ struct MovableObject {
 };
 
 struct Package {
-  MovableObject load(std::function<PythonObject(InterpreterSession&)> ctor) {
-    auto I = acquire_session();
-    auto loaded = ctor(I);
-    auto pickled = I.impl_->pickle(I.self, loaded);
-    return MovableObject(
-        manager_->next_object_id_++, std::move(pickled), manager_);
-  }
   // shorthand for getting the object as a pickle resource in the package
   MovableObject load_pickle(const std::string& module, const std::string& file) {
-    return load([&](InterpreterSession& I) {
-      return I.self.attr("load_pickle")({module, file});
-    });
+    auto I = acquire_session();
+    auto loaded = I.self.attr("load_pickle")({module, file});
+    return I.create_movable(loaded);
   }
 
   InterpreterSession acquire_session() {
@@ -247,5 +249,11 @@ private:
  InterpreterManager* manager_;
  std::shared_ptr<caffe2::serialize::PyTorchStreamReader> container_file_;
 };
+
+inline InterpreterSession::~InterpreterSession() {
+  if (manager_ && notify_idx_ >= 0) {
+    manager_->resources_.free(notify_idx_);
+  }
+}
 
 } // namespace torch
