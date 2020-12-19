@@ -17,7 +17,7 @@ struct InterpreterManager;
 
 struct InterpreterSession {
   InterpreterSession(InterpreterSessionImpl* impl, InterpreterManager* manager)
-  : impl_(impl), manager_(manager) {}
+      : impl_(impl), manager_(manager) {}
 
   PythonObject self; // when retreived from a PythonMovable this will be set.
   InterpreterSession(InterpreterSession&&) = default;
@@ -30,10 +30,12 @@ struct InterpreterSession {
   }
 
   MovableObject create_movable(PythonObject obj);
-private:
+
+ private:
   friend struct MovableObject;
   friend struct Package;
   friend struct InterpreterManager;
+  friend struct MovableObjectImpl;
   std::unique_ptr<InterpreterSessionImpl> impl_;
   InterpreterManager* manager_; // if created from one
   int64_t notify_idx_ = -1;
@@ -54,7 +56,7 @@ class Interpreter {
 
  public:
   Interpreter(InterpreterManager* manager)
-  : handle_(nullptr), manager_(manager) {
+      : handle_(nullptr), manager_(manager) {
     char library_name[L_tmpnam];
     library_name_ = library_name;
     std::tmpnam(library_name);
@@ -195,8 +197,21 @@ struct InterpreterManager {
   LoadBalancer resources_;
 };
 
+struct MovableObjectImpl {
+  MovableObjectImpl(
+      size_t object_id,
+      PickledObject data,
+      InterpreterManager* manager)
+      : object_id_(object_id), data_(data), manager_(manager) {}
+  ~MovableObjectImpl();
+  void unload(const Interpreter* on_this_interpreter);
+  int64_t object_id_;
+  PickledObject data_;
+  InterpreterManager* manager_;
+};
 
 struct MovableObject {
+  MovableObject() : pImpl_(nullptr) {}
   InterpreterSession acquire_session(
       const Interpreter* on_this_interpreter = nullptr);
   at::IValue operator()(at::ArrayRef<at::IValue> args) {
@@ -204,21 +219,13 @@ struct MovableObject {
     return I.self(args).toIValue();
   }
   void unload(const Interpreter* on_this_interpreter = nullptr);
-  ~MovableObject() {
-    unload();
-  }
 
  private:
+  MovableObject(std::shared_ptr<MovableObjectImpl> pImpl)
+      : pImpl_(std::move(pImpl)) {}
+  std::shared_ptr<MovableObjectImpl> pImpl_;
   friend struct Package;
   friend struct InterpreterSession;
-  MovableObject(
-      size_t object_id,
-      PickledObject data,
-      InterpreterManager* manager)
-      : object_id_(object_id), data_(data), manager_(manager) {}
-  int64_t object_id_;
-  PickledObject data_;
-  InterpreterManager* manager_;
 };
 
 struct Package {

@@ -39,3 +39,15 @@ TEST(TorchpyTest, SimpleModel) {
 TEST(TorchpyTest, ResNet) {
   compare_torchpy_jit("resnet");
 }
+
+TEST(TorchpyTest, Movable) {
+  torch::InterpreterManager m(1);
+  torch::MovableObject obj;
+  {
+    auto I = m.acquire_one();
+    auto model =
+        I.global("torch.nn", "Module")(std::vector<torch::PythonObject>());
+    obj = I.create_movable(model);
+  }
+  obj.acquire_session();
+}

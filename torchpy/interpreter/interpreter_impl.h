@@ -40,6 +40,8 @@ struct InterpreterSessionImpl {
   friend struct MovableObject;
   friend struct PythonObject;
   friend struct InterpreterSession;
+  friend struct MovableObjectImpl;
+
   virtual ~InterpreterSessionImpl() = default;
 
  private:

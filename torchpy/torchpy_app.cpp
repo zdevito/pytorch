@@ -57,20 +57,18 @@ const int min_items_to_complete = 1;
 
 struct RunPython {
   static torch::MovableObject load_and_wrap(torch::Package& package) {
-      auto I = package.acquire_session();
-      auto obj = I.self.attr("load_pickle")({"model", "model.pkl"});
-      if (cuda) {
-        obj = I.global("gpu_wrapper", "GPUWrapper")({obj});
-      }
+    auto I = package.acquire_session();
+    auto obj = I.self.attr("load_pickle")({"model", "model.pkl"});
+    if (cuda) {
+      obj = I.global("gpu_wrapper", "GPUWrapper")({obj});
+    }
     return I.create_movable(obj);
   }
   RunPython(
       torch::Package& package,
       std::vector<at::IValue> eg,
       const torch::Interpreter* interps)
-      : obj_(load_and_wrap(package)),
-        eg_(std::move(eg)),
-        interps_(interps) {}
+      : obj_(load_and_wrap(package)), eg_(std::move(eg)), interps_(interps) {}
   void operator()(int i) {
     auto I = obj_.acquire_session();
     if (cuda) {
