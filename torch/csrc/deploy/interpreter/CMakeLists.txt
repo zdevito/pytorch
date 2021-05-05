@@ -11,8 +11,9 @@ SET(PYTHON_BIN "${PYTHON_INSTALL_DIR}/bin/python3")
 ExternalProject_Add(
   cpython
   PREFIX cpython
-  GIT_REPOSITORY https://github.com/python/cpython.git
-  GIT_TAG v3.8.6
+  # GIT_REPOSITORY https://github.com/python/cpython.git
+  # GIT_TAG v3.8.6
+  SOURCE_DIR /raid/zdevito/cpython
   UPDATE_COMMAND ""
   BUILD_IN_SOURCE True
   CONFIGURE_COMMAND CFLAGS=-fPIC CPPFLAGS=-fPIC <SOURCE_DIR>/configure --prefix ${PYTHON_INSTALL_DIR}
@@ -86,12 +87,13 @@ add_library(torch_python_static STATIC $<TARGET_OBJECTS:torch_python_obj>)
 set(LINKER_SCRIPT "${INTERPRETER_DIR}/hide_symbols.script")
 set(INTERPRETER_LIB_SOURCES
   ${INTERPRETER_DIR}/interpreter_impl.cpp
+  ${INTERPRETER_DIR}/linker.cpp
   ${FROZEN_FILES}
   ${LINKER_SCRIPT}
 )
 add_library(torch_deployinterpreter ${INTERPRETER_LIB_SOURCES} ${LINKER_SCRIPT})
-set_property(TARGET torch_deployinterpreter APPEND_STRING PROPERTY
-             LINK_FLAGS " -Wl,--version-script=${LINKER_SCRIPT}")
+#set_property(TARGET torch_deployinterpreter APPEND_STRING PROPERTY
+#             LINK_FLAGS " -Wl,--version-script=${LINKER_SCRIPT}")
 # need to ensure headers are present before any .cpp in interpreter are compiled,
 # but cpp themselves don't clearly depend on cpython so there is a race otherwise
 add_dependencies(torch_deployinterpreter cpython)

@@ -97,9 +97,12 @@ Interpreter::Interpreter(InterpreterManager* manager)
   // new_intepreter_impl, comment out this line so that the so lasts long enough
   // for the debugger to see it.
   unlink(library_name_.c_str());
+  auto set_deploy_self_ptr = (void (*)(void*))dlsym(handle_, "set_deploy_self");
+  AT_ASSERT(set_deploy_self_ptr);
+  set_deploy_self_ptr(handle_);
 
   void* new_interpreter_impl = dlsym(handle_, "new_interpreter_impl");
-  assert(new_interpreter_impl);
+  AT_ASSERT(new_interpreter_impl);
   pImpl_ = std::unique_ptr<InterpreterImpl>(
       // NOLINTNEXTLINE(modernize-redundant-void-arg)
       ((InterpreterImpl * (*)(void)) new_interpreter_impl)());

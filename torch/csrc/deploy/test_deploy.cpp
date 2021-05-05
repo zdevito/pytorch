@@ -7,9 +7,16 @@
 #include <string>
 
 int main(int argc, char* argv[]) {
-  ::testing::InitGoogleTest(&argc, argv);
-  int rc = RUN_ALL_TESTS();
-  return rc;
+  torch::deploy::InterpreterManager manager(2);
+
+  for (auto& interp : manager.all_instances()) {
+    auto I = interp.acquire_session();
+    I.global("sys", "path").attr("append")({"."});
+    I.global("my_stuff", "__name__");
+  }
+  //  ::testing::InitGoogleTest(&argc, argv);
+  //  int rc = RUN_ALL_TESTS();
+  return 0;
 }
 
 void compare_torchpy_jit(const char* model_filename, const char* jit_filename) {
