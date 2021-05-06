@@ -47,6 +47,11 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <limits.h>
+#include <libgen.h>
+#include <functional>
+#define _GNU_SOURCE         /* See feature_test_macros(7) */
+#include <link.h>
 
 std::vector<std::string> split_path(const std::string& s, char delim) {
   const char* cur = s.c_str();
@@ -66,6 +71,36 @@ std::vector<std::string> split_path(const std::string& s, char delim) {
     cur = next + 1;
   }
   return result;
+}
+
+
+// https://stackoverflow.com/questions/23006930/the-shared-library-rpath-and-the-binary-rpath-priority/52647116#52647116
+void replace_all(std::string& str, const std::string& from, const std::string& to) {
+    if(from.empty())
+        return;
+    size_t start_pos = 0;
+    while((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length(); // In case 'to' contains 'from', like replacing 'x' with 'yx'
+    }
+}
+
+std::string resolve_path(const std::string& origin, const std::string& t) {
+  std::string result = t;
+  replace_all(result, "$ORIGIN", origin);
+  char buf[PATH_MAX];
+  char* resolved = realpath(result.c_str(), buf);
+  if (!resolved) {
+    return result;
+  }
+  return resolved;
+}
+
+std::string resolve_origin(const std::string& so_name) {
+  char origin[PATH_MAX];
+  realpath(so_name.c_str(), origin);
+  dirname(origin);
+  return origin;
 }
 
 template <typename... Args>
@@ -238,25 +273,46 @@ struct jit_descriptor {
   struct jit_code_entry* first_entry;
 };
 
+
+extern "C" void* __tls_get_addr(void*);
+
+struct TLSEntry {
+  size_t module_id;
+  size_t offset;
+};
+
 struct TLSSegment {
   TLSSegment() {
     int r = pthread_key_create(&tls_key_, free);
     assert(r == 0);
   }
   void* addr(size_t offset) {
-    void* start = pthread_getspecific(tls_key_);
-    if (!start) {
-      start = malloc(mem_size_);
-      memcpy(start, initalization_image_, file_size_);
-      pthread_setspecific(tls_key_, start);
+    if (mem_size_ == 0) {
+      // this was a real TLS entry, fall back to the libc implementation
+      TLSEntry real_get_addr = {module_id_, offset};
+      // std::cout << "I THINK THE ID IS: " << module_id_ << " " << offset << "\n";
+      return __tls_get_addr(&real_get_addr);
+    } else {
+      // this was a TLS entry for one of our modules, so we use pthreads to emulate
+      // thread local state.
+      void* start = pthread_getspecific(tls_key_);
+      if (!start) {
+        start = malloc(mem_size_);
+        memcpy(start, initalization_image_, file_size_);
+        pthread_setspecific(tls_key_, start);
+      }
+      return (void*)((const char*)start + offset);
     }
-    return (void*)((const char*)start + offset);
   }
 
  private:
   pthread_key_t tls_key_;
   void* initalization_image_;
-  size_t file_size_;
+
+  union {
+    size_t file_size_;
+    size_t module_id_;
+  };
   size_t mem_size_;
   friend struct ElfFile;
 };
@@ -315,6 +371,146 @@ struct SystemLibrary {
  private:
   void* handle_;
 };
+
+// TODO: dedup with ElfFile
+struct AlreadyLoadedSymTable {
+  AlreadyLoadedSymTable(const char* name, Elf64_Addr load_bias, const Elf64_Phdr* program_headers, size_t n_program_headers)
+  : load_bias_(load_bias) {
+    Elf64_Dyn* dynamic = nullptr;
+    for (size_t i = 0; i < n_program_headers; ++i) {
+      const Elf64_Phdr* phdr = &program_headers[i];
+
+      // Segment addresses in memory.
+      Elf64_Addr seg_start = phdr->p_vaddr + load_bias_;
+      if (phdr->p_type == PT_DYNAMIC) {
+        dynamic = reinterpret_cast<Elf64_Dyn*>(seg_start);
+        break;
+      }
+    }
+
+    if(!dynamic) {
+      error("%s couldn't find PT_DYNAMIC", name, load_bias);
+    }
+
+    for (const Elf64_Dyn* d = dynamic; d->d_tag != DT_NULL; ++d) {
+      void* addr = d->d_un.d_ptr > load_bias_ ? reinterpret_cast<void*>(d->d_un.d_ptr) : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
+      auto value = d->d_un.d_val;
+      switch (d->d_tag) {
+        case DT_SYMTAB:
+          symtab_ = (Elf64_Sym*)addr;
+          break;
+        case DT_STRTAB:
+          strtab_ = (const char*)addr;
+          break;
+        case DT_STRSZ:
+          strtab_size_ = value;
+          break;
+
+        case DT_GNU_HASH: {
+          gnu_nbucket_ = reinterpret_cast<uint32_t*>(addr)[0];
+          // skip symndx
+          gnu_maskwords_ = reinterpret_cast<uint32_t*>(addr)[2];
+          gnu_shift2_ = reinterpret_cast<uint32_t*>(addr)[3];
+          gnu_bloom_filter_ =
+              reinterpret_cast<Elf64_Addr*>((Elf64_Addr)addr + 16);
+          gnu_bucket_ =
+              reinterpret_cast<uint32_t*>(gnu_bloom_filter_ + gnu_maskwords_);
+          // amend chain for symndx = header[1]
+          gnu_chain_ =
+              gnu_bucket_ + gnu_nbucket_ - reinterpret_cast<uint32_t*>(addr)[1];
+          --gnu_maskwords_;
+        } break;
+      }
+    }
+
+    if (!gnu_bucket_) {
+      std::cout << name << ": no DT_GNU_HASH section, I don't know how to read DT_HASH...\n";
+    }
+  }
+  void* sym(const char* name, GnuHash* precomputed_hash = nullptr) {
+    if (!gnu_bucket_) {
+      return nullptr;
+    }
+    GnuHash hash_obj = precomputed_hash ? *precomputed_hash : GnuHash(name);
+    auto hash = hash_obj.hash;
+    auto name_len = hash_obj.name_len;
+    constexpr uint32_t kBloomMaskBits = sizeof(Elf64_Addr) * 8;
+
+    const uint32_t word_num = (hash / kBloomMaskBits) & gnu_maskwords_;
+    const Elf64_Addr bloom_word = gnu_bloom_filter_[word_num];
+    const uint32_t h1 = hash % kBloomMaskBits;
+    const uint32_t h2 = (hash >> gnu_shift2_) % kBloomMaskBits;
+
+    if ((1 & (bloom_word >> h1) & (bloom_word >> h2)) != 1) {
+      return nullptr;
+    }
+
+    uint32_t sym_idx = gnu_bucket_[hash % gnu_nbucket_];
+    if (sym_idx == 0) {
+      return nullptr;
+    }
+
+    uint32_t chain_value = 0;
+    const Elf64_Sym* sym = nullptr;
+
+    do {
+      sym = symtab_ + sym_idx;
+      chain_value = gnu_chain_[sym_idx];
+      if ((chain_value >> 1) == (hash >> 1)) {
+        if (static_cast<size_t>(sym->st_name) + name_len + 1 <= strtab_size_ &&
+            memcmp(strtab_ + sym->st_name, name, name_len + 1) == 0 &&
+            (ELF64_ST_BIND(sym->st_info) == STB_GLOBAL ||
+             ELF64_ST_BIND(sym->st_info) == STB_WEAK)) {
+          if (ELF64_ST_TYPE(sym->st_info) == STT_TLS) {
+            return (void*) sym->st_value;
+          } else {
+            return (void*)(load_bias_ + sym->st_value);
+          }
+        }
+      }
+      ++sym_idx;
+    } while ((chain_value & 1) == 0);
+    return nullptr;
+  }
+private:
+  Elf64_Addr load_bias_;
+  size_t gnu_nbucket_;
+  uint32_t* gnu_bucket_ = nullptr;
+  uint32_t* gnu_chain_;
+  uint32_t gnu_maskwords_;
+  uint32_t gnu_shift2_;
+  Elf64_Addr* gnu_bloom_filter_;
+  const Elf64_Sym* symtab_;
+  const char* strtab_;
+  size_t strtab_size_;
+};
+
+
+static int iterate_cb(struct dl_phdr_info * info, size_t size, void * data) {
+  auto fn = (std::function<int(struct dl_phdr_info * info, size_t size)>*)data;
+  return (*fn)(info, size);
+}
+
+bool slow_find_tls_symbol_offset(const char* sym_name, TLSEntry* result) {
+    bool found = false;
+    std::function<int(struct dl_phdr_info *,size_t)> cb = [&](struct dl_phdr_info * info, size_t size) {
+    // std::cout << "SEARCHING .. " << info->dlpi_name << "\n";
+    AlreadyLoadedSymTable symtable(info->dlpi_name, info->dlpi_addr, info->dlpi_phdr, info->dlpi_phnum);
+    void* sym_addr = symtable.sym(sym_name);
+    if (sym_addr) {
+      // std::cout << "FOUND IT IN: " << info->dlpi_name << " it has modid: " << info->dlpi_tls_modid << "\n";
+      result->module_id = info->dlpi_tls_modid;
+      result->offset = (Elf64_Addr) sym_addr;
+      found = true;
+      return 1;
+    }
+    return 0;
+  };
+
+  dl_iterate_phdr(iterate_cb, (void*)&cb);
+  return found;
+}
+
 
 struct ElfFile {
   ElfFile(const ElfFile&) = delete;
@@ -522,8 +718,6 @@ struct ElfFile {
           break;
 
         case DT_HASH:
-          error(
-              "%s: found DT_HASH but only can read DT_GNU_HASH", name_.c_str());
           break;
 
         case DT_GNU_HASH: {
@@ -543,7 +737,11 @@ struct ElfFile {
       }
     }
 
-    // pass ,2 for things that require the strtab_ to be loaded
+    if (!gnu_bucket_) {
+      error("%s: no DT_GNU_HASH section, I don't know how to read DT_HASH...", name_.c_str());
+    }
+
+    // pass 2 for things that require the strtab_ to be loaded
     std::vector<const char*> needed;
     std::string runpath = "";
     for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
@@ -551,6 +749,8 @@ struct ElfFile {
         case DT_NEEDED:
           needed.push_back(get_string(d->d_un.d_val));
           break;
+        case DT_RPATH: /* not quite correct, because this is a different order than runpath,
+                          but better than not processing it at all */
         case DT_RUNPATH:
           runpath = get_string(d->d_un.d_val);
           break;
@@ -562,11 +762,18 @@ struct ElfFile {
   void resolve_needed_libraries(
       const std::string& runpath,
       const std::vector<const char*>& needed) {
-    if (strchr(runpath.c_str(), '$') != nullptr) {
-      error("NYI: $ arguments in modpath: %s", runpath.c_str());
-    }
+
+    std::string origin = resolve_origin(name_);
     std::vector<std::string> paths = split_path(runpath, ':');
+    for (size_t i = 0; i < paths.size(); ++i) {
+      paths[i] = resolve_path(origin, paths[i]);
+    }
+
     for (const char* name : needed) {
+      if (strcmp(name, "libtorch_python.so") == 0) {
+        // torchvision expects it...
+        continue;
+      }
       system_libraries_.push_back(std::make_unique<SystemLibrary>(name, paths));
     }
   }
@@ -602,7 +809,11 @@ struct ElfFile {
             memcmp(strtab_ + sym->st_name, name, name_len + 1) == 0 &&
             (ELF64_ST_BIND(sym->st_info) == STB_GLOBAL ||
              ELF64_ST_BIND(sym->st_info) == STB_WEAK)) {
-          return (void*)(load_bias_ + sym->st_value);
+          if (ELF64_ST_TYPE(sym->st_info) == STT_TLS) {
+            return (void*) sym->st_value;
+          } else {
+            return (void*)(load_bias_ + sym->st_value);
+          }
         }
       }
       ++sym_idx;
@@ -653,19 +864,18 @@ struct ElfFile {
         // "\n";
         return;
       }
-      if ((r_type == R_X86_64_DTPOFF64 || r_type == R_X86_64_DTPMOD64) &&
-          (Elf64_Addr)sym(sym_name) != sym_addr) {
-        error(
-            "cannot resolve thread_local symbol to another module: %s",
-            sym_name);
-      }
+      // if ((r_type == R_X86_64_DTPOFF64 || r_type == R_X86_64_DTPMOD64) &&
+      //     (Elf64_Addr)sym(sym_name) != sym_addr) {
+      //   error(
+      //       "cannot resolve thread_local symbol to another module: %s",
+      //       sym_name);
+      // }
     }
 
     switch (r_type) {
       case R_X86_64_JUMP_SLOT:
       case R_X86_64_64:
-      case R_X86_64_GLOB_DAT:
-      case R_X86_64_DTPOFF64: {
+      case R_X86_64_GLOB_DAT: {
         const Elf64_Addr result = sym_addr + reloc.r_addend;
         *static_cast<Elf64_Addr*>(rel_target) = result;
       } break;
@@ -687,7 +897,30 @@ struct ElfFile {
         *static_cast<Elf32_Addr*>(rel_target) = result;
       } break;
       case R_X86_64_DTPMOD64: {
-        *static_cast<TLSSegment**>(rel_target) = &tls_;
+        if (sym_addr != 0 && (Elf64_Addr)sym(sym_name) != sym_addr) {
+          TLSEntry entry;
+          if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
+            error("%s: FAILED TO FIND TLS ENTRY", sym_name);
+          }
+          auto seg = new TLSSegment();
+          seg->mem_size_ = 0;
+          seg->module_id_ = entry.module_id;
+          *static_cast<TLSSegment**>(rel_target) = seg;
+        } else {
+          *static_cast<TLSSegment**>(rel_target) = &tls_;
+        }
+      } break;
+      case R_X86_64_DTPOFF64: {
+        if (sym_addr != 0 && (Elf64_Addr)sym(sym_name) != sym_addr) {
+          TLSEntry entry;
+          if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
+            error("%s: FAILED TO FIND TLS ENTRY", sym_name);
+          }
+          *static_cast<Elf64_Addr*>(rel_target) = entry.offset + reloc.r_addend;
+        } else {
+          const Elf64_Addr result = sym_addr + reloc.r_addend;
+          *static_cast<Elf64_Addr*>(rel_target) = result;
+        }
       } break;
       default:
         error("unknown reloc type %d in \"%s\"", r_type, name_.c_str());
@@ -784,7 +1017,7 @@ struct ElfFile {
   size_t n_fini_array_;
   size_t strtab_size_;
   size_t gnu_nbucket_;
-  uint32_t* gnu_bucket_;
+  uint32_t* gnu_bucket_ = nullptr;
   uint32_t* gnu_chain_;
   uint32_t gnu_maskwords_;
   uint32_t gnu_shift2_;
@@ -826,7 +1059,6 @@ extern "C" dl_funcptr _PyImport_FindSharedFuncptr(
     const char* shortname,
     const char* pathname,
     FILE* fp) {
-  std::cout << "IMPORTING...\n";
   char* args[] = {"deploy"};
   loaded_files_.emplace_back(std::make_unique<ElfFile>(pathname, 1, args));
   ElfFile& lib = *loaded_files_.back();

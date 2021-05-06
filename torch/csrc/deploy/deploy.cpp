@@ -88,7 +88,7 @@ Interpreter::Interpreter(InterpreterManager* manager)
       size ==
       fwrite(_binary_libtorch_deployinterpreter_so_start, 1, size, dst));
   fclose(dst);
-  handle_ = dlopen(library_name, RTLD_LOCAL | RTLD_LAZY);
+  handle_ = dlopen(library_name, RTLD_LOCAL | RTLD_LAZY | RTLD_DEEPBIND);
   if (!handle_) {
     throw std::runtime_error(dlerror());
   }

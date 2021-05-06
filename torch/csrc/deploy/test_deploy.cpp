@@ -7,7 +7,7 @@
 #include <string>
 
 int main(int argc, char* argv[]) {
-  torch::deploy::InterpreterManager manager(2);
+  torch::deploy::InterpreterManager manager(1);
 
   for (auto& interp : manager.all_instances()) {
     auto I = interp.acquire_session();
