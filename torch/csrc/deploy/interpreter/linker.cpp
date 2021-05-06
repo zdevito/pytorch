@@ -251,29 +251,6 @@ struct EH_Frame_HDR {
   int32_t eh_frame_ptr;
 };
 
-typedef enum {
-  JIT_NOACTION = 0,
-  JIT_REGISTER_FN,
-  JIT_UNREGISTER_FN
-} jit_actions_t;
-
-struct jit_code_entry {
-  struct jit_code_entry* next_entry;
-  struct jit_code_entry* prev_entry;
-  const char* symfile_addr;
-  uint64_t symfile_size;
-};
-
-struct jit_descriptor {
-  uint32_t version;
-  /* This type should be jit_actions_t, but we use uint32_t
-     to be explicit about the bitwidth.  */
-  uint32_t action_flag;
-  struct jit_code_entry* relevant_entry;
-  struct jit_code_entry* first_entry;
-};
-
-
 extern "C" void* __tls_get_addr(void*);
 
 struct TLSEntry {
@@ -327,11 +304,20 @@ static void* local__tls_get_addr(TLSIndex* idx) {
 }
 
 /* GDB puts a breakpoint in this function.  */
-void __attribute__((noinline)) __jit_debug_register_code(){};
+__attribute__((noinline)) void __deploy_register_code() {
+  std::cout << "";
+};
 
-/* Make sure to specify the version statically, because the
-   debugger may check the version before we can set it.  */
-struct jit_descriptor __jit_debug_descriptor = {1, 0, 0, 0};
+struct DeployModuleInfo {
+  const char * name;
+  Elf64_Addr file_addr;
+  size_t file_size;
+  Elf64_Addr load_bias;
+};
+
+extern "C" {
+  DeployModuleInfo __deploy_module_info;
+}
 
 struct SystemLibrary {
   SystemLibrary() : handle_(RTLD_DEFAULT) {}
@@ -393,6 +379,9 @@ struct AlreadyLoadedSymTable {
     }
 
     for (const Elf64_Dyn* d = dynamic; d->d_tag != DT_NULL; ++d) {
+      // it looks like libc has already added the load_bias to some of these addresses,
+      // so don't do it again. Note that the check `d->d_un.d_ptr > load_bias_` is just a heuristic
+      // if the library itself is bigger than the load bias then this might still be a relative addressq
       void* addr = d->d_un.d_ptr > load_bias_ ? reinterpret_cast<void*>(d->d_un.d_ptr) : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
       auto value = d->d_un.d_val;
       switch (d->d_tag) {
@@ -957,18 +946,18 @@ struct ElfFile {
     read_dynamic_section();
     relocate();
     __register_frame(eh_frame_);
-    // gdb_entry_.next_entry = nullptr;
-    // gdb_entry_.prev_entry = nullptr;
-    // gdb_entry_.symfile_addr = contents_.data();
-    // gdb_entry_.symfile_size = contents_.size();
-    // __jit_debug_descriptor.action_flag = JIT_REGISTER_FN;
-    // __jit_debug_descriptor.first_entry = &gdb_entry_;
-    // __jit_debug_descriptor.relevant_entry = &gdb_entry_;
-    // __jit_debug_register_code();
-    initialize();
     std::cout << "target modules add " << name_.c_str() << "\n";
     std::cout << "target modules load -f " << name_.c_str() << " -s "
               << std::hex << "0x" << load_bias_ << "\n";
+    __deploy_module_info.name = name_.c_str();
+    std::cout << (uint64_t)(void*) name_.c_str() << " <- name address\n";
+    __deploy_module_info.file_addr = (Elf64_Addr) contents_.data();
+    __deploy_module_info.file_size = contents_.size();
+    __deploy_module_info.load_bias = load_bias_;
+    // debugger script sets a breakpoint on this function,
+    // then reads __deploy_module_info to issue the target module commands.
+    __deploy_register_code();
+    initialize();
   }
 
   ~ElfFile() {
@@ -1028,8 +1017,6 @@ struct ElfFile {
   bool initialized_ = false;
 
   TLSSegment tls_;
-
-  jit_code_entry gdb_entry_;
 
   std::vector<std::unique_ptr<SystemLibrary>> system_libraries_;
 };
