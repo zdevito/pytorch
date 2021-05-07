@@ -319,43 +319,107 @@ extern "C" {
 }
 
 struct SystemLibrary {
-  SystemLibrary() : handle_(RTLD_DEFAULT) {}
-  SystemLibrary(void* handle) : handle_(handle) {}
-  SystemLibrary(
-      const char* library_name,
-      std::vector<std::string>& search_path) {
-    if (strchr(library_name, '/') == nullptr) {
-      for (const std::string& path : search_path) {
-        std::stringstream ss;
-        ss << path << "/" << library_name;
-        handle_ = dlopen(ss.str().c_str(), RTLD_LAZY | RTLD_LOCAL);
-        if (handle_) {
-          return;
-        }
-      }
-    }
-    // we failed in the search_path, or this is an absolute path
-    handle_ = dlopen(library_name, RTLD_LAZY | RTLD_LOCAL);
-    if (!handle_) {
-      error("%s: %s", library_name, dlerror());
+  SystemLibrary()
+  : SystemLibrary(RTLD_DEFAULT, false) {}
+  SystemLibrary(void* handle, bool steal) : handle_(handle), own_handle_(steal && handle != RTLD_DEFAULT) {}
+  SystemLibrary(const char* path, int flags)
+  : own_handle_(false) {
+    handle_ = dlopen(path, flags);
+    if (handle_) {
+      own_handle_ = true;
     }
   }
-  SystemLibrary(const SystemLibrary& rhs) = delete;
-  void* sym(const char* name) {
+  bool loaded() const {
+    return handle_ != nullptr;
+  }
+
+  void* sym(const char* name) const {
     return dlsym(handle_, name);
   }
-  std::string last_error() const {
+  const char* last_error() const {
     return dlerror();
   }
+
+  // rule of 5:
+  SystemLibrary(const SystemLibrary& rhs) = delete;
+  SystemLibrary& operator=(const SystemLibrary& rhs) = delete;
+  SystemLibrary(SystemLibrary&& rhs)
+  : SystemLibrary() {
+    swap(rhs);
+  }
+  SystemLibrary& operator=(SystemLibrary&& rhs) {
+    swap(rhs);
+    return *this;
+  }
   ~SystemLibrary() {
-    if (handle_ && handle_ != RTLD_DEFAULT) {
+    if (own_handle_) {
       dlclose(handle_);
     }
   }
 
  private:
+  void swap(SystemLibrary& rhs) {
+    std::swap(handle_, rhs.handle_);
+    std::swap(own_handle_, rhs.own_handle_);
+  }
   void* handle_;
+  bool own_handle_;
 };
+
+std::pair<const char*, std::vector<const char*>> load_needed_from_elf_file(const char* filename, const char* data) {
+  auto header_ = (Elf64_Ehdr*) data;
+  auto program_headers = (Elf64_Phdr*)(data + header_->e_phoff);
+  auto n_program_headers = header_->e_phnum;
+  const Elf64_Dyn* dynamic = nullptr;
+  for (size_t i = 0; i < n_program_headers; ++i) {
+    const Elf64_Phdr* phdr = &program_headers[i];
+    if (phdr->p_type == PT_DYNAMIC) {
+      dynamic = reinterpret_cast<const Elf64_Dyn*>(data + phdr->p_offset);
+    }
+  }
+  if (!dynamic) {
+    error("%s: could not load dynamic section for looking up DT_NEEDED", filename);
+  }
+
+  const char* runpath = "";
+  std::vector<const char*> needed;
+
+  auto segment_headers = (Elf64_Shdr*)(data + header_->e_shoff);
+  size_t n_segments = header_->e_shnum;
+  const char* strtab = nullptr;
+
+  const char* segment_string_table = data + segment_headers[header_->e_shstrndx].sh_offset;
+
+  for (size_t i = 0; i < n_segments; ++i) {
+    const Elf64_Shdr* shdr = &segment_headers[i];
+    if (shdr->sh_type == SHT_STRTAB && strcmp(".dynstr", segment_string_table + shdr->sh_name) == 0) {
+      strtab = data + shdr->sh_offset;
+      break;
+    }
+  }
+
+
+  if (!strtab) {
+    error("%s: could not load dynstr for DT_NEEDED", filename);
+  }
+
+  for (const Elf64_Dyn* d = dynamic; d->d_tag != DT_NULL; ++d) {
+    switch (d->d_tag) {
+      case DT_NEEDED:
+        // std::cout << "NEEDED: '" << strtab + d->d_un.d_val << "'\n";
+        needed.push_back(strtab + d->d_un.d_val);
+        break;
+      case DT_RPATH: /* not quite correct, because this is a different order
+                        than runpath,
+                        but better than not processing it at all */
+      case DT_RUNPATH:
+        // std::cout << "RUNPATH: '" << strtab + d->d_un.d_val << "'\n";
+        runpath = strtab + d->d_un.d_val;
+        break;
+    }
+  }
+  return std::make_pair(runpath, std::move(needed));
+}
 
 struct ElfDynamicInfo {
   std::string name_;
@@ -400,6 +464,7 @@ struct ElfDynamicInfo {
           ? reinterpret_cast<void*>(d->d_un.d_ptr)
           : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
       auto value = d->d_un.d_val;
+
       switch (d->d_tag) {
         case DT_SYMTAB:
           symtab_ = (Elf64_Sym*)addr;
@@ -497,7 +562,7 @@ struct ElfDynamicInfo {
     }
   }
 
-  void* sym(const char* name, GnuHash* precomputed_hash = nullptr) {
+  void* sym(const char* name, GnuHash* precomputed_hash = nullptr) const {
     if (!gnu_bucket_) {
       return nullptr; // no hashtable was loaded
     }
@@ -601,6 +666,85 @@ bool slow_find_tls_symbol_offset(const char* sym_name, TLSEntry* result) {
   return found;
 }
 
+void resolve_needed_libraries(std::vector<SystemLibrary>& system_libraries,
+    const std::string& origin_relative,
+    std::vector<std::string>& search_path,
+    const std::string& runpath_template,
+    const std::vector<const char*>& needed) {
+  size_t search_path_start_size = search_path.size();
+
+  std::string origin = resolve_origin(origin_relative);
+  std::vector<std::string> paths = split_path(runpath_template, ':');
+  // backwards because we want paths to be search in order but we search search_path backward
+  for (size_t i = paths.size(); i > 0; --i) {
+    search_path.emplace_back(resolve_path(origin, paths[i - 1]));
+  }
+
+  for (const char* name : needed) {
+    // std::cout << "ATTEMPTING FIND " << name << "\n";
+    if (strcmp(name, "libtorch_python.so") == 0) {
+      // torchvision expects it...
+      continue;
+    }
+    // find the library, either (1) it is already loaded,
+    //                          (2) it is an absolute path that exists,
+    //                          (3) we find it in the search path
+    //                          (4) we can dlopen it
+
+
+    // (1) the library is already loaded
+    const int base_flags = RTLD_LAZY | RTLD_LOCAL;
+    SystemLibrary already_loaded(name, base_flags | RTLD_NOLOAD);
+    if (already_loaded.loaded()) {
+      // std::cout << "ALREADY LOADED " << name << "\n";
+      system_libraries.emplace_back(std::move(already_loaded));
+      continue;
+    }
+
+    std::string library_path = "";
+    // (2) it is an absolute path
+    if (strchr(name, '/') != nullptr) {
+      library_path = name;
+    } else {
+      // (3) find it in the search path
+      for (size_t i = search_path.size(); i > 0; --i) {
+        std::stringstream ss;
+        ss << search_path[i - 1] << "/" << name;
+        if (access(ss.str().c_str(), F_OK) == 0) {
+          library_path = ss.str();
+          break;
+        }
+      }
+    }
+
+    std::vector<SystemLibrary> sublibraries; // these need to say loaded until we open library_path
+                                             // otherwise we might dlclose a sublibary
+
+    if (library_path != "") {
+      // std::cout << "LOOKING FOR SUBLIBRARIES FOR FILE AT PATH " << library_path << "\n";
+      // we found the actual file, recursively load its deps before opening it so we resolve their paths correctly
+      MemFile image(library_path.c_str());
+      auto search = load_needed_from_elf_file(library_path.c_str(), image.data());
+      resolve_needed_libraries(sublibraries, library_path, search_path, search.first, search.second);
+    } else {
+      library_path = name;
+    }
+
+    // either we didn't find the file, or we have already loaded its deps
+    // in both cases, we now try to call dlopen. In the case where we didn't find the file, we hope that
+    // some like LD_LIBRARY_PATH knows where it is. In the case where we found it, we know its deps are loaded and resolved.
+
+    // std::cout << "OPENING " << library_path << "\n";
+    SystemLibrary try_open(library_path.c_str(), base_flags);
+    if (!try_open.loaded()) {
+      error("%s: could not load library, dlopen says: %s", name, try_open.last_error());
+    }
+    system_libraries.emplace_back(std::move(try_open));
+  }
+
+  // unwind search_path stack
+  search_path.erase(search_path.begin() + search_path_start_size, search_path.end());
+}
 
 struct ElfFile {
   ElfFile(const ElfFile&) = delete;
@@ -615,10 +759,10 @@ struct ElfFile {
     program_headers_ = (Elf64_Phdr*)(data_ + header_->e_phoff);
     n_program_headers_ = header_->e_phnum;
     // system library search path starts with the process global symbols.
-    system_libraries_.push_back(std::make_unique<SystemLibrary>());
+    system_libraries_.emplace_back(SystemLibrary());
   }
   void add_system_library(void* handle) {
-    system_libraries_.push_back(std::make_unique<SystemLibrary>(handle));
+    system_libraries_.emplace_back(SystemLibrary(handle, false));
   }
   void reserve_address_space() {
     Elf64_Addr min_vaddr, max_vaddr;
@@ -747,31 +891,14 @@ struct ElfFile {
   void read_dynamic_section() {
     dyninfo_.initialize_from_dynamic_section(
         name_, dynamic_, load_bias_, false);
-    resolve_needed_libraries(dyninfo_.runpath_, dyninfo_.needed_);
+    std::vector<std::string> empty_search_path;
+    resolve_needed_libraries(system_libraries_, name_, empty_search_path, dyninfo_.runpath_, dyninfo_.needed_);
   }
 
-  void resolve_needed_libraries(
-      const std::string& runpath,
-      const std::vector<const char*>& needed) {
-
-    std::string origin = resolve_origin(name_);
-    std::vector<std::string> paths = split_path(runpath, ':');
-    for (size_t i = 0; i < paths.size(); ++i) {
-      paths[i] = resolve_path(origin, paths[i]);
-    }
-
-    for (const char* name : needed) {
-      if (strcmp(name, "libtorch_python.so") == 0) {
-        // torchvision expects it...
-        continue;
-      }
-      system_libraries_.push_back(std::make_unique<SystemLibrary>(name, paths));
-    }
-  }
 
   Elf64_Addr lookup_symbol(const char* name, bool must_be_defined) {
     for (const auto& sys_lib : system_libraries_) {
-      void* r = sys_lib->sym(name);
+      void* r = sys_lib.sym(name);
       if (r) {
         return (Elf64_Addr)r;
       }
@@ -904,7 +1031,6 @@ struct ElfFile {
     std::cout << "target modules load -f " << name_.c_str() << " -s "
               << std::hex << "0x" << load_bias_ << "\n";
     __deploy_module_info.name = name_.c_str();
-    std::cout << (uint64_t)(void*) name_.c_str() << " <- name address\n";
     __deploy_module_info.file_addr = (Elf64_Addr) contents_.data();
     __deploy_module_info.file_size = contents_.size();
     __deploy_module_info.load_bias = load_bias_;
@@ -942,7 +1068,7 @@ struct ElfFile {
     f(argc_, argv_, environ);
   }
 
-  void* sym(const char* name) {
+  void* sym(const char* name) const {
     return dyninfo_.sym(name);
   }
 
@@ -966,7 +1092,7 @@ struct ElfFile {
 
   TLSSegment tls_;
 
-  std::vector<std::unique_ptr<SystemLibrary>> system_libraries_;
+  std::vector<SystemLibrary> system_libraries_;
 };
 
 using func_t = int (*)(int, int);
