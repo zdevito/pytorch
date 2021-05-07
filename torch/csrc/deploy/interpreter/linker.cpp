@@ -387,12 +387,18 @@ struct ElfDynamicInfo {
     return strtab_ + idx;
   }
 
-  void initialize_from_dynamic_section(std::string name, Elf64_Dyn* dynamic, Elf64_Addr load_bias, bool check_absolute) {
+  void initialize_from_dynamic_section(
+      std::string name,
+      Elf64_Dyn* dynamic,
+      Elf64_Addr load_bias,
+      bool check_absolute) {
     name_ = std::move(name);
     load_bias_ = load_bias;
     dynamic_ = dynamic;
     for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
-      void* addr = (check_absolute && d->d_un.d_ptr > load_bias_) ? reinterpret_cast<void*>(d->d_un.d_ptr) : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
+      void* addr = (check_absolute && d->d_un.d_ptr > load_bias_)
+          ? reinterpret_cast<void*>(d->d_un.d_ptr)
+          : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
       auto value = d->d_un.d_val;
       switch (d->d_tag) {
         case DT_SYMTAB:
@@ -470,7 +476,9 @@ struct ElfDynamicInfo {
     }
 
     if (!gnu_bucket_) {
-      std::cout  << name_ << ": no DT_GNU_HASH section, I don't know how to read DT_HASH... symbol lookup will fail";
+      std::cout
+          << name_
+          << ": no DT_GNU_HASH section, I don't know how to read DT_HASH... symbol lookup will fail";
     }
 
     // pass 2 for things that require the strtab_ to be loaded
@@ -479,7 +487,8 @@ struct ElfDynamicInfo {
         case DT_NEEDED:
           needed_.push_back(get_string(d->d_un.d_val));
           break;
-        case DT_RPATH: /* not quite correct, because this is a different order than runpath,
+        case DT_RPATH: /* not quite correct, because this is a different order
+                          than runpath,
                           but better than not processing it at all */
         case DT_RUNPATH:
           runpath_ = get_string(d->d_un.d_val);
@@ -533,14 +542,18 @@ struct ElfDynamicInfo {
     } while ((chain_value & 1) == 0);
     return nullptr;
   }
-
 };
 
 struct AlreadyLoadedSymTable {
-private:
+ private:
   ElfDynamicInfo dyninfo_;
-public:
-  AlreadyLoadedSymTable(const char* name, Elf64_Addr load_bias, const Elf64_Phdr* program_headers, size_t n_program_headers) {
+
+ public:
+  AlreadyLoadedSymTable(
+      const char* name,
+      Elf64_Addr load_bias,
+      const Elf64_Phdr* program_headers,
+      size_t n_program_headers) {
     Elf64_Dyn* dynamic = nullptr;
     for (size_t i = 0; i < n_program_headers; ++i) {
       const Elf64_Phdr* phdr = &program_headers[i];
@@ -552,7 +565,7 @@ public:
         break;
       }
     }
-    if(!dynamic) {
+    if (!dynamic) {
       error("%s couldn't find PT_DYNAMIC", name, load_bias);
     }
     dyninfo_.initialize_from_dynamic_section(name, dynamic, load_bias, true);
@@ -562,7 +575,6 @@ public:
     return dyninfo_.sym(name);
   }
 };
-
 
 static int iterate_cb(struct dl_phdr_info * info, size_t size, void * data) {
   auto fn = (std::function<int(struct dl_phdr_info * info, size_t size)>*)data;
@@ -733,7 +745,8 @@ struct ElfFile {
     }
   }
   void read_dynamic_section() {
-    dyninfo_.initialize_from_dynamic_section(name_, dynamic_, load_bias_, false);
+    dyninfo_.initialize_from_dynamic_section(
+        name_, dynamic_, load_bias_, false);
     resolve_needed_libraries(dyninfo_.runpath_, dyninfo_.needed_);
   }
 
@@ -846,7 +859,7 @@ struct ElfFile {
         }
       } break;
       case R_X86_64_DTPOFF64: {
-        if (sym_addr != 0 && (Elf64_Addr) dyninfo_.sym(sym_name) != sym_addr) {
+        if (sym_addr != 0 && (Elf64_Addr)dyninfo_.sym(sym_name) != sym_addr) {
           TLSEntry entry;
           if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
             error("%s: FAILED TO FIND TLS ENTRY", sym_name);
