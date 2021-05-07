@@ -50,7 +50,6 @@
 #include <limits.h>
 #include <libgen.h>
 #include <functional>
-#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <link.h>
 
 std::vector<std::string> split_path(const std::string& s, char delim) {
@@ -358,31 +357,42 @@ struct SystemLibrary {
   void* handle_;
 };
 
-// TODO: dedup with ElfFile
-struct AlreadyLoadedSymTable {
-  AlreadyLoadedSymTable(const char* name, Elf64_Addr load_bias, const Elf64_Phdr* program_headers, size_t n_program_headers)
-  : load_bias_(load_bias) {
-    Elf64_Dyn* dynamic = nullptr;
-    for (size_t i = 0; i < n_program_headers; ++i) {
-      const Elf64_Phdr* phdr = &program_headers[i];
+struct ElfDynamicInfo {
+  std::string name_;
+  const Elf64_Dyn* dynamic_;
+  Elf64_Addr load_bias_;
+  const Elf64_Sym* symtab_;
+  const char* strtab_;
+  size_t strtab_size_;
+  Elf64_Rela* plt_rela_;
+  size_t n_plt_rela_;
+  Elf64_Rela* rela_;
+  size_t n_rela_;
+  linker_ctor_function_t init_func_;
+  linker_ctor_function_t* init_array_;
+  linker_dtor_function_t fini_func_;
+  linker_dtor_function_t* fini_array_;
+  size_t n_init_array_;
+  size_t n_fini_array_;
+  size_t gnu_nbucket_;
+  uint32_t* gnu_bucket_ = nullptr;
+  uint32_t* gnu_chain_;
+  uint32_t gnu_maskwords_;
+  uint32_t gnu_shift2_;
+  Elf64_Addr* gnu_bloom_filter_;
+  std::string runpath_;
+  std::vector<const char*> needed_;
 
-      // Segment addresses in memory.
-      Elf64_Addr seg_start = phdr->p_vaddr + load_bias_;
-      if (phdr->p_type == PT_DYNAMIC) {
-        dynamic = reinterpret_cast<Elf64_Dyn*>(seg_start);
-        break;
-      }
-    }
+  const char* get_string(int idx) {
+    return strtab_ + idx;
+  }
 
-    if(!dynamic) {
-      error("%s couldn't find PT_DYNAMIC", name, load_bias);
-    }
-
-    for (const Elf64_Dyn* d = dynamic; d->d_tag != DT_NULL; ++d) {
-      // it looks like libc has already added the load_bias to some of these addresses,
-      // so don't do it again. Note that the check `d->d_un.d_ptr > load_bias_` is just a heuristic
-      // if the library itself is bigger than the load bias then this might still be a relative addressq
-      void* addr = d->d_un.d_ptr > load_bias_ ? reinterpret_cast<void*>(d->d_un.d_ptr) : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
+  void initialize_from_dynamic_section(std::string name, Elf64_Dyn* dynamic, Elf64_Addr load_bias, bool check_absolute) {
+    name_ = std::move(name);
+    load_bias_ = load_bias;
+    dynamic_ = dynamic;
+    for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
+      void* addr = (check_absolute && d->d_un.d_ptr > load_bias_) ? reinterpret_cast<void*>(d->d_un.d_ptr) : reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
       auto value = d->d_un.d_val;
       switch (d->d_tag) {
         case DT_SYMTAB:
@@ -391,8 +401,55 @@ struct AlreadyLoadedSymTable {
         case DT_STRTAB:
           strtab_ = (const char*)addr;
           break;
+
         case DT_STRSZ:
           strtab_size_ = value;
+          break;
+
+        case DT_JMPREL:
+          plt_rela_ = (Elf64_Rela*)addr;
+          break;
+        case DT_PLTRELSZ:
+          n_plt_rela_ = value / sizeof(Elf64_Rela);
+          break;
+        case DT_RELA:
+          rela_ = (Elf64_Rela*)addr;
+          break;
+        case DT_RELASZ:
+          n_rela_ = value / sizeof(Elf64_Rela);
+          break;
+
+        case DT_INIT:
+          init_func_ = reinterpret_cast<linker_ctor_function_t>(
+              load_bias_ + d->d_un.d_ptr);
+          break;
+
+        case DT_FINI:
+          fini_func_ = reinterpret_cast<linker_dtor_function_t>(
+              load_bias_ + d->d_un.d_ptr);
+          break;
+
+        case DT_INIT_ARRAY:
+          init_array_ = reinterpret_cast<linker_ctor_function_t*>(
+              load_bias_ + d->d_un.d_ptr);
+          break;
+
+        case DT_INIT_ARRAYSZ:
+          n_init_array_ =
+              static_cast<uint32_t>(d->d_un.d_val) / sizeof(Elf64_Addr);
+          break;
+
+        case DT_FINI_ARRAY:
+          fini_array_ = reinterpret_cast<linker_dtor_function_t*>(
+              load_bias_ + d->d_un.d_ptr);
+          break;
+
+        case DT_FINI_ARRAYSZ:
+          n_fini_array_ =
+              static_cast<uint32_t>(d->d_un.d_val) / sizeof(Elf64_Addr);
+          break;
+
+        case DT_HASH:
           break;
 
         case DT_GNU_HASH: {
@@ -413,12 +470,27 @@ struct AlreadyLoadedSymTable {
     }
 
     if (!gnu_bucket_) {
-      std::cout << name << ": no DT_GNU_HASH section, I don't know how to read DT_HASH...\n";
+      std::cout  << name_ << ": no DT_GNU_HASH section, I don't know how to read DT_HASH... symbol lookup will fail";
+    }
+
+    // pass 2 for things that require the strtab_ to be loaded
+    for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
+      switch (d->d_tag) {
+        case DT_NEEDED:
+          needed_.push_back(get_string(d->d_un.d_val));
+          break;
+        case DT_RPATH: /* not quite correct, because this is a different order than runpath,
+                          but better than not processing it at all */
+        case DT_RUNPATH:
+          runpath_ = get_string(d->d_un.d_val);
+          break;
+      }
     }
   }
+
   void* sym(const char* name, GnuHash* precomputed_hash = nullptr) {
     if (!gnu_bucket_) {
-      return nullptr;
+      return nullptr; // no hashtable was loaded
     }
     GnuHash hash_obj = precomputed_hash ? *precomputed_hash : GnuHash(name);
     auto hash = hash_obj.hash;
@@ -461,17 +533,34 @@ struct AlreadyLoadedSymTable {
     } while ((chain_value & 1) == 0);
     return nullptr;
   }
+
+};
+
+struct AlreadyLoadedSymTable {
 private:
-  Elf64_Addr load_bias_;
-  size_t gnu_nbucket_;
-  uint32_t* gnu_bucket_ = nullptr;
-  uint32_t* gnu_chain_;
-  uint32_t gnu_maskwords_;
-  uint32_t gnu_shift2_;
-  Elf64_Addr* gnu_bloom_filter_;
-  const Elf64_Sym* symtab_;
-  const char* strtab_;
-  size_t strtab_size_;
+  ElfDynamicInfo dyninfo_;
+public:
+  AlreadyLoadedSymTable(const char* name, Elf64_Addr load_bias, const Elf64_Phdr* program_headers, size_t n_program_headers) {
+    Elf64_Dyn* dynamic = nullptr;
+    for (size_t i = 0; i < n_program_headers; ++i) {
+      const Elf64_Phdr* phdr = &program_headers[i];
+
+      // Segment addresses in memory.
+      Elf64_Addr seg_start = phdr->p_vaddr + load_bias;
+      if (phdr->p_type == PT_DYNAMIC) {
+        dynamic = reinterpret_cast<Elf64_Dyn*>(seg_start);
+        break;
+      }
+    }
+    if(!dynamic) {
+      error("%s couldn't find PT_DYNAMIC", name, load_bias);
+    }
+    dyninfo_.initialize_from_dynamic_section(name, dynamic, load_bias, true);
+  }
+
+  void* sym(const char* name) {
+    return dyninfo_.sym(name);
+  }
 };
 
 
@@ -643,109 +732,9 @@ struct ElfFile {
       }
     }
   }
-  const char* get_string(int idx) {
-    return strtab_ + idx;
-  }
-
   void read_dynamic_section() {
-    for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
-      void* addr = reinterpret_cast<void*>(load_bias_ + d->d_un.d_ptr);
-      auto value = d->d_un.d_val;
-      switch (d->d_tag) {
-        case DT_SYMTAB:
-          symtab_ = (Elf64_Sym*)addr;
-          break;
-        case DT_STRTAB:
-          strtab_ = (const char*)addr;
-          break;
-
-        case DT_STRSZ:
-          strtab_size_ = value;
-          break;
-
-        case DT_JMPREL:
-          plt_rela_ = (Elf64_Rela*)addr;
-          break;
-        case DT_PLTRELSZ:
-          n_plt_rela_ = value / sizeof(Elf64_Rela);
-          break;
-        case DT_RELA:
-          rela_ = (Elf64_Rela*)addr;
-          break;
-        case DT_RELASZ:
-          n_rela_ = value / sizeof(Elf64_Rela);
-          break;
-
-        case DT_INIT:
-          init_func_ = reinterpret_cast<linker_ctor_function_t>(
-              load_bias_ + d->d_un.d_ptr);
-          break;
-
-        case DT_FINI:
-          fini_func_ = reinterpret_cast<linker_dtor_function_t>(
-              load_bias_ + d->d_un.d_ptr);
-          break;
-
-        case DT_INIT_ARRAY:
-          init_array_ = reinterpret_cast<linker_ctor_function_t*>(
-              load_bias_ + d->d_un.d_ptr);
-          break;
-
-        case DT_INIT_ARRAYSZ:
-          n_init_array_ =
-              static_cast<uint32_t>(d->d_un.d_val) / sizeof(Elf64_Addr);
-          break;
-
-        case DT_FINI_ARRAY:
-          fini_array_ = reinterpret_cast<linker_dtor_function_t*>(
-              load_bias_ + d->d_un.d_ptr);
-          break;
-
-        case DT_FINI_ARRAYSZ:
-          n_fini_array_ =
-              static_cast<uint32_t>(d->d_un.d_val) / sizeof(Elf64_Addr);
-          break;
-
-        case DT_HASH:
-          break;
-
-        case DT_GNU_HASH: {
-          gnu_nbucket_ = reinterpret_cast<uint32_t*>(addr)[0];
-          // skip symndx
-          gnu_maskwords_ = reinterpret_cast<uint32_t*>(addr)[2];
-          gnu_shift2_ = reinterpret_cast<uint32_t*>(addr)[3];
-          gnu_bloom_filter_ =
-              reinterpret_cast<Elf64_Addr*>((Elf64_Addr)addr + 16);
-          gnu_bucket_ =
-              reinterpret_cast<uint32_t*>(gnu_bloom_filter_ + gnu_maskwords_);
-          // amend chain for symndx = header[1]
-          gnu_chain_ =
-              gnu_bucket_ + gnu_nbucket_ - reinterpret_cast<uint32_t*>(addr)[1];
-          --gnu_maskwords_;
-        } break;
-      }
-    }
-
-    if (!gnu_bucket_) {
-      error("%s: no DT_GNU_HASH section, I don't know how to read DT_HASH...", name_.c_str());
-    }
-
-    // pass 2 for things that require the strtab_ to be loaded
-    std::vector<const char*> needed;
-    std::string runpath = "";
-    for (const Elf64_Dyn* d = dynamic_; d->d_tag != DT_NULL; ++d) {
-      switch (d->d_tag) {
-        case DT_NEEDED:
-          needed.push_back(get_string(d->d_un.d_val));
-          break;
-        case DT_RPATH: /* not quite correct, because this is a different order than runpath,
-                          but better than not processing it at all */
-        case DT_RUNPATH:
-          runpath = get_string(d->d_un.d_val);
-          break;
-      }
-    }
-    resolve_needed_libraries(runpath, needed);
+    dyninfo_.initialize_from_dynamic_section(name_, dynamic_, load_bias_, false);
+    resolve_needed_libraries(dyninfo_.runpath_, dyninfo_.needed_);
   }
 
   void resolve_needed_libraries(
@@ -767,49 +756,6 @@ struct ElfFile {
     }
   }
 
-  void* sym(const char* name, GnuHash* precomputed_hash = nullptr) {
-    GnuHash hash_obj = precomputed_hash ? *precomputed_hash : GnuHash(name);
-    auto hash = hash_obj.hash;
-    auto name_len = hash_obj.name_len;
-    constexpr uint32_t kBloomMaskBits = sizeof(Elf64_Addr) * 8;
-
-    const uint32_t word_num = (hash / kBloomMaskBits) & gnu_maskwords_;
-    const Elf64_Addr bloom_word = gnu_bloom_filter_[word_num];
-    const uint32_t h1 = hash % kBloomMaskBits;
-    const uint32_t h2 = (hash >> gnu_shift2_) % kBloomMaskBits;
-
-    if ((1 & (bloom_word >> h1) & (bloom_word >> h2)) != 1) {
-      return nullptr;
-    }
-
-    uint32_t sym_idx = gnu_bucket_[hash % gnu_nbucket_];
-    if (sym_idx == 0) {
-      return nullptr;
-    }
-
-    uint32_t chain_value = 0;
-    const Elf64_Sym* sym = nullptr;
-
-    do {
-      sym = symtab_ + sym_idx;
-      chain_value = gnu_chain_[sym_idx];
-      if ((chain_value >> 1) == (hash >> 1)) {
-        if (static_cast<size_t>(sym->st_name) + name_len + 1 <= strtab_size_ &&
-            memcmp(strtab_ + sym->st_name, name, name_len + 1) == 0 &&
-            (ELF64_ST_BIND(sym->st_info) == STB_GLOBAL ||
-             ELF64_ST_BIND(sym->st_info) == STB_WEAK)) {
-          if (ELF64_ST_TYPE(sym->st_info) == STT_TLS) {
-            return (void*) sym->st_value;
-          } else {
-            return (void*)(load_bias_ + sym->st_value);
-          }
-        }
-      }
-      ++sym_idx;
-    } while ((chain_value & 1) == 0);
-    return nullptr;
-  }
-
   Elf64_Addr lookup_symbol(const char* name, bool must_be_defined) {
     for (const auto& sys_lib : system_libraries_) {
       void* r = sys_lib->sym(name);
@@ -817,7 +763,7 @@ struct ElfFile {
         return (Elf64_Addr)r;
       }
     }
-    void* r = sym(name);
+    void* r = dyninfo_.sym(name);
     if (!r && must_be_defined) {
       error("%s: symbol not found in ElfFile lookup", name);
     }
@@ -836,8 +782,8 @@ struct ElfFile {
       return;
     }
     if (r_sym != 0) {
-      auto sym_st = symtab_[r_sym];
-      sym_name = get_string(sym_st.st_name);
+      auto sym_st = dyninfo_.symtab_[r_sym];
+      sym_name = dyninfo_.get_string(sym_st.st_name);
       // std::cout << "PROCESSING SYMBOL: " << sym_name << "\n";
 
       bool must_be_defined =
@@ -886,7 +832,7 @@ struct ElfFile {
         *static_cast<Elf32_Addr*>(rel_target) = result;
       } break;
       case R_X86_64_DTPMOD64: {
-        if (sym_addr != 0 && (Elf64_Addr)sym(sym_name) != sym_addr) {
+        if (sym_addr != 0 && (Elf64_Addr)dyninfo_.sym(sym_name) != sym_addr) {
           TLSEntry entry;
           if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
             error("%s: FAILED TO FIND TLS ENTRY", sym_name);
@@ -900,7 +846,7 @@ struct ElfFile {
         }
       } break;
       case R_X86_64_DTPOFF64: {
-        if (sym_addr != 0 && (Elf64_Addr)sym(sym_name) != sym_addr) {
+        if (sym_addr != 0 && (Elf64_Addr) dyninfo_.sym(sym_name) != sym_addr) {
           TLSEntry entry;
           if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
             error("%s: FAILED TO FIND TLS ENTRY", sym_name);
@@ -917,35 +863,30 @@ struct ElfFile {
     }
   }
   void relocate() {
-    for (size_t i = 0; i < n_rela_; ++i) {
-      relocate_one(rela_[i]);
+    for (size_t i = 0; i < dyninfo_.n_rela_; ++i) {
+      relocate_one(dyninfo_.rela_[i]);
     }
-    for (size_t i = 0; i < n_plt_rela_; ++i) {
-      relocate_one(plt_rela_[i]);
+    for (size_t i = 0; i < dyninfo_.n_plt_rela_; ++i) {
+      relocate_one(dyninfo_.plt_rela_[i]);
     }
   }
 
   void initialize() {
-    call_function(init_func_);
-    for (size_t i = 0; i < n_init_array_; ++i) {
-      call_function(init_array_[i]);
+    call_function(dyninfo_.init_func_);
+    for (size_t i = 0; i < dyninfo_.n_init_array_; ++i) {
+      call_function(dyninfo_.init_array_[i]);
     }
     initialized_ = true;
   }
 
   void finalize() {
-    for (size_t i = n_fini_array_; i > 0; --i) {
-      call_function(fini_array_[i - 1]);
+    for (size_t i = dyninfo_.n_fini_array_; i > 0; --i) {
+      call_function(dyninfo_.fini_array_[i - 1]);
     }
-    call_function(fini_func_);
+    call_function(dyninfo_.fini_func_);
   }
 
-  void load() {
-    reserve_address_space();
-    load_segments();
-    read_dynamic_section();
-    relocate();
-    __register_frame(eh_frame_);
+  void register_debug_info() {
     std::cout << "target modules add " << name_.c_str() << "\n";
     std::cout << "target modules load -f " << name_.c_str() << " -s "
               << std::hex << "0x" << load_bias_ << "\n";
@@ -957,6 +898,15 @@ struct ElfFile {
     // debugger script sets a breakpoint on this function,
     // then reads __deploy_module_info to issue the target module commands.
     __deploy_register_code();
+  }
+
+  void load() {
+    reserve_address_space();
+    load_segments();
+    read_dynamic_section();
+    relocate();
+    __register_frame(eh_frame_);
+    register_debug_info();
     initialize();
   }
 
@@ -979,39 +929,24 @@ struct ElfFile {
     f(argc_, argv_, environ);
   }
 
+  void* sym(const char* name) {
+    return dyninfo_.sym(name);
+  }
+
  private:
   const char* data_;
   const Elf64_Ehdr* header_;
   const Elf64_Phdr* program_headers_;
-  const Elf64_Dyn* dynamic_;
   const EH_Frame_HDR* eh_frame_hdr_;
   void* eh_frame_;
   size_t n_program_headers_;
   void* mapped_library_;
   size_t mapped_size_;
   Elf64_Addr load_bias_;
+  Elf64_Dyn* dynamic_;
+  ElfDynamicInfo dyninfo_;
   MemFile contents_;
   std::string name_;
-  const Elf64_Sym* symtab_;
-  const char* strtab_;
-  Elf64_Rela* plt_rela_;
-  size_t n_plt_rela_;
-  Elf64_Rela* rela_;
-  size_t n_rela_;
-  linker_ctor_function_t init_func_;
-  linker_ctor_function_t* init_array_;
-  linker_dtor_function_t fini_func_;
-  linker_dtor_function_t* fini_array_;
-  size_t n_init_array_;
-  size_t n_fini_array_;
-  size_t strtab_size_;
-  size_t gnu_nbucket_;
-  uint32_t* gnu_bucket_ = nullptr;
-  uint32_t* gnu_chain_;
-  uint32_t gnu_maskwords_;
-  uint32_t gnu_shift2_;
-  Elf64_Addr* gnu_bloom_filter_;
-
   int argc_;
   char** argv_;
   bool initialized_ = false;

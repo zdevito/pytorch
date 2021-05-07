@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
 
 void compare_torchpy_jit(const char* model_filename, const char* jit_filename) {
   // Test
-  torch::deploy::InterpreterManager m(1);
+  torch::deploy::InterpreterManager m(2);
   torch::deploy::Package p = m.load_package(model_filename);
   auto model = p.load_pickle("model", "model.pkl");
   at::IValue eg;
