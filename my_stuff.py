@@ -16,7 +16,7 @@ model.eval()
 x = [torch.rand(3, 300, 400).cuda(), torch.rand(3, 500, 400).cuda()]
 predictions = model(x)
 print(predictions)
-# import numpy as np
+import numpy as np
 
-# a = np.arange(15).reshape(3, 5)
-# print(a + a)
+a = np.arange(15).reshape(3, 5)
+print(a + a)
