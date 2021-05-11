@@ -18,7 +18,7 @@ void run_my_stuff() {
 }
 
 void test_shared_library_load() {
-  torch::deploy::InterpreterManager manager(2);
+  torch::deploy::InterpreterManager manager(1);
   auto no_args = at::ArrayRef<torch::deploy::Obj>();
   for (auto& interp : manager.all_instances()) {
     auto I = interp.acquire_session();
@@ -74,7 +74,9 @@ void test_shared_library_load() {
 
 int main(int argc, char* argv[]) {
   test_shared_library_load();
-  // run_my_stuff();
+  //test_shared_library_load();
+
+  run_my_stuff();
   //  ::testing::InitGoogleTest(&argc, argv);
   //  int rc = RUN_ALL_TESTS();
   return 0;

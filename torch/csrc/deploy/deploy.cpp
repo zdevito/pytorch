@@ -11,7 +11,6 @@
 // instance of python.
 extern "C" char _binary_libtorch_deployinterpreter_so_start[];
 extern "C" char _binary_libtorch_deployinterpreter_so_end[];
-
 namespace torch {
 namespace deploy {
 
@@ -112,6 +111,8 @@ Interpreter::~Interpreter() {
   if (handle_) {
     // ensure python uninitialization runs before we dlclose the library
     pImpl_.reset();
+    auto deploy_flush_python_libs = (void (*)(void))dlsym(handle_, "deploy_flush_python_libs");
+    deploy_flush_python_libs();
     dlclose(handle_);
   }
 }

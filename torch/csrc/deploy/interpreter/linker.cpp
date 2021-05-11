@@ -287,38 +287,29 @@ struct EH_Frame_HDR {
 // with the module_id and offset.
 extern "C" void* __tls_get_addr(void*);
 
+extern "C" int __cxa_thread_atexit_impl(void (*dtor) (void *), void *obj, void *dso_symbol);
+
+struct ElfFile;
+
+struct TLSMemory {
+  TLSMemory(std::shared_ptr<ElfFile> file)
+  : file_(std::move(file)) {}
+  std::shared_ptr<ElfFile> file_;
+  char mem_[0]; // malloc'd to follow
+};
+
+static void delete_TLSMemory(void *obj) {
+  auto tls_mem = ((TLSMemory*)obj);
+  tls_mem->file_ = nullptr;
+  free(tls_mem);
+}
+
 // This object performs TLS emulation for modules not loaded by dlopen.
 // Normally modules have a module_id that is used as a key in libc for the
 // thread local data for that module. However, there is no public API for
 // assigning this module id. Instead, for modules that we load, we set module_id
 // to a pointer to a TLSSegment object, and replace __tls_get_addr with a
 // function that calls `addr`.
-struct TLSSegment {
-  TLSSegment() {
-    int r = pthread_key_create(&tls_key_, free);
-    assert(r == 0);
-  }
-  void* addr(size_t offset) {
-    // this was a TLS entry for one of our modules, so we use pthreads to
-    // emulate thread local state.
-    void* start = pthread_getspecific(tls_key_);
-    if (!start) {
-      start = malloc(mem_size_);
-      memcpy(start, initalization_image_, file_size_);
-      memset(
-          (void*)((const char*)start + file_size_), 0, mem_size_ - file_size_);
-      pthread_setspecific(tls_key_, start);
-    }
-    return (void*)((const char*)start + offset);
-  }
-
- private:
-  pthread_key_t tls_key_;
-  void* initalization_image_;
-  size_t file_size_;
-  size_t mem_size_;
-  friend struct ElfFile;
-};
 
 // libc module_id's are sequential, so we use the top bit as a flag to see
 // if we have a local TLSegment object instead. This will break if
@@ -331,12 +322,7 @@ struct TLSIndex {
   size_t offset;
 };
 
-static void* local__tls_get_addr(TLSIndex* idx) {
-  if ((idx->module_id & TLS_LOCAL_FLAG) != 0) {
-    return ((TLSSegment*)(idx->module_id & ~TLS_LOCAL_FLAG))->addr(idx->offset);
-  }
-  return __tls_get_addr(idx);
-}
+static void* local__tls_get_addr(TLSIndex* idx);
 
 /* LLDB puts a breakpoint in this function, and reads __deploy_module_info to
  * get debug info from library.  */
@@ -815,7 +801,9 @@ void resolve_needed_libraries(std::vector<SystemLibrary>& system_libraries,
   search_path.erase(search_path.begin() + search_path_start_size, search_path.end());
 }
 
-struct ElfFile {
+extern "C" void* __dso_handle;
+
+struct ElfFile : public std::enable_shared_from_this<ElfFile> {
   ElfFile(const ElfFile&) = delete;
   ElfFile(const char* filename, int argc, char** argv)
       : contents_(filename),
@@ -823,6 +811,7 @@ struct ElfFile {
         name_(filename),
         argc_(argc),
         argv_(argv) {
+    pthread_key_create(&tls_key_, nullptr);
     data_ = contents_.data();
     header_ = (Elf64_Ehdr*)data_;
     program_headers_ = (Elf64_Phdr*)(data_ + header_->e_phoff);
@@ -863,9 +852,9 @@ struct ElfFile {
               (void*)((int64_t)&eh_frame_hdr_->eh_frame_ptr + eh_frame_hdr_->eh_frame_ptr);
           break;
         case PT_TLS:
-          tls_.file_size_ = phdr->p_filesz;
-          tls_.mem_size_ = phdr->p_memsz;
-          tls_.initalization_image_ = (void*)seg_start;
+          tls_file_size_ = phdr->p_filesz;
+          tls_mem_size_ = phdr->p_memsz;
+          tls_initalization_image_ = (void*)seg_start;
           break;
       };
 
@@ -1039,9 +1028,9 @@ struct ElfFile {
           }
           *static_cast<size_t*>(rel_target) = entry.module_id;
         } else {
-          size_t tls_ptr_as_number = (size_t)&tls_;
+          size_t this_as_number = (size_t) this;
           *static_cast<size_t*>(rel_target) =
-              tls_ptr_as_number | TLS_LOCAL_FLAG;
+              this_as_number | TLS_LOCAL_FLAG;
         }
       } break;
       case R_X86_64_DTPOFF64: {
@@ -1109,7 +1098,7 @@ struct ElfFile {
   }
 
   ~ElfFile() {
-    std::cout << "LINKER IS UNLOADING: " << name_ << "\n";
+    // std::cout << "LINKER IS UNLOADING: " << name_ << "\n";
     if (initialized_) {
       finalize();
     }
@@ -1132,6 +1121,22 @@ struct ElfFile {
     return (void*)dyninfo_.sym(name).value_or(0);
   }
 
+  void* tls_addr(size_t offset) {
+    // this was a TLS entry for one of our modules, so we use pthreads to
+    // emulate thread local state.
+    TLSMemory* tls_mem = (TLSMemory*) pthread_getspecific(tls_key_);
+    if (!tls_mem) {
+      tls_mem =  (TLSMemory*) malloc(sizeof(TLSMemory) + tls_mem_size_);
+      new (tls_mem) TLSMemory(shared_from_this());
+      __cxa_thread_atexit_impl(delete_TLSMemory, tls_mem, &__dso_handle);
+      memcpy(tls_mem->mem_, tls_initalization_image_, tls_file_size_);
+      memset(
+          (void*)((const char*)tls_mem->mem_ + tls_file_size_), 0, tls_mem_size_ - tls_file_size_);
+      pthread_setspecific(tls_key_, tls_mem);
+    }
+    return (void*)((const char*)tls_mem->mem_ + offset);
+  }
+
  private:
   MemFile contents_;
   const char* data_;
@@ -1149,21 +1154,23 @@ struct ElfFile {
   int argc_;
   char** argv_;
   bool initialized_ = false;
-  TLSSegment tls_;
+
+  pthread_key_t tls_key_;
+  void* tls_initalization_image_;
+  size_t tls_file_size_;
+  size_t tls_mem_size_;
+
   std::vector<SystemLibrary> system_libraries_;
 };
 
-using func_t = int (*)(int, int);
-
-void printit(const std::vector<std::string>& strs) {
-  std::cout << "{\n";
-  for (const std::string& s : strs) {
-    std::cout << s << "\n";
+static void* local__tls_get_addr(TLSIndex* idx) {
+  if ((idx->module_id & TLS_LOCAL_FLAG) != 0) {
+    return ((ElfFile*)(idx->module_id & ~TLS_LOCAL_FLAG))->tls_addr(idx->offset);
   }
-  std::cout << "}\n";
+  return __tls_get_addr(idx);
 }
 
-std::vector<ElfFile*> loaded_files_;
+std::vector<std::shared_ptr<ElfFile>> loaded_files_;
 
 static void* deploy_self = nullptr;
 
@@ -1179,11 +1186,10 @@ extern "C" dl_funcptr _PyImport_FindSharedFuncptr(
     const char* pathname,
     FILE* fp) {
   char* args[] = {"deploy"};
-  // XXX: loaded_files_ never gets destroyed, so dtors of the library are never
-  // run this is because it is hard to get loaded_files_ to happen at the right
-  // place in library unload in particular, thread exits for threads created
-  // before this library were loaded will happen after this list is destructed.
-  loaded_files_.emplace_back(new ElfFile(pathname, 1, args));
+  // XXX: we have to manually flush loaded_files_ (see deploy_flush_python_libs)
+  // when the manager unloads. Otherwise some libraries can live longer than they are needed,
+  // and the process of unloading them might use functionality that itself gets unloaded.
+  loaded_files_.emplace_back(std::make_shared<ElfFile>(pathname, 1, args));
   ElfFile& lib = *loaded_files_.back();
   lib.add_system_library(deploy_self);
   lib.load();
@@ -1193,4 +1199,8 @@ extern "C" dl_funcptr _PyImport_FindSharedFuncptr(
   assert(r);
   // std::cout << "LOADED " << pathname << "\n";
   return r;
+}
+
+extern "C" void deploy_flush_python_libs() {
+  loaded_files_.clear();
 }

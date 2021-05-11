@@ -11,10 +11,10 @@ SET(PYTHON_BIN "${PYTHON_INSTALL_DIR}/bin/python3")
 ExternalProject_Add(
   cpython
   PREFIX cpython
-  # GIT_REPOSITORY https://github.com/python/cpython.git
-  # GIT_TAG v3.8.6
-  SOURCE_DIR /raid/zdevito/cpython
+  GIT_REPOSITORY https://github.com/python/cpython.git
+  GIT_TAG v3.8.6
   UPDATE_COMMAND ""
+  PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/cpython_patch.diff
   BUILD_IN_SOURCE True
   CONFIGURE_COMMAND CFLAGS=-fPIC CPPFLAGS=-fPIC <SOURCE_DIR>/configure --prefix ${PYTHON_INSTALL_DIR}
   BUILD_COMMAND CFLAGS=-fPIC CPPFLAGS=-fPIC make -j8
