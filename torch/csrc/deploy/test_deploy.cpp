@@ -6,14 +6,75 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, char* argv[]) {
-  torch::deploy::InterpreterManager manager(1);
+thread_local int in_another_module = 5;
 
+void run_my_stuff() {
+  torch::deploy::InterpreterManager manager(1);
   for (auto& interp : manager.all_instances()) {
     auto I = interp.acquire_session();
     I.global("sys", "path").attr("append")({"."});
     I.global("my_stuff", "__name__");
   }
+}
+
+void test_shared_library_load() {
+  torch::deploy::InterpreterManager manager(2);
+  auto no_args = at::ArrayRef<torch::deploy::Obj>();
+  for (auto& interp : manager.all_instances()) {
+    auto I = interp.acquire_session();
+    I.global("sys", "path").attr("append")({"torch/csrc/deploy"});
+    I.global(
+        "test_deploy_python", "setup")({getenv("DEPLOY_TEST_PYTHON_PATH")});
+    AT_ASSERT(I.global("libtest_deploy_lib", "check_initial_state")(no_args)
+                  .toIValue()
+                  .toBool());
+    AT_ASSERT(
+        I.global("libtest_deploy_lib", "simple_add")({5, 4})
+            .toIValue()
+            .toInt() == 9);
+    I.global("numpy", "array"); // force numpy to load here so it is loaded
+                                // twice before we run the tests
+  }
+  for (auto& interp : manager.all_instances()) {
+    auto I = interp.acquire_session();
+    auto i =
+        I.global("test_deploy_python", "numpy_test")({1}).toIValue().toInt();
+    I.global("libtest_deploy_lib", "raise_and_catch_exception")({true});
+    try {
+      I.global("libtest_deploy_lib", "raise_exception")(no_args);
+      AT_ERROR("NO THROW");
+    } catch (std::runtime_error& err) {
+      AT_ASSERT(std::string(err.what()).find("yet") != std::string::npos);
+    }
+    in_another_module = 6;
+    AT_ASSERT(
+        I.global("libtest_deploy_lib", "get_in_another_module")(no_args)
+            .toIValue()
+            .toInt() == 6);
+    AT_ASSERT(
+        I.global("libtest_deploy_lib", "get_bar")(no_args).toIValue().toInt() ==
+        14);
+    {
+      std::thread foo([&] {
+        I.global("libtest_deploy_lib", "set_bar")({13});
+        AT_ASSERT(
+            I.global("libtest_deploy_lib", "get_bar")(no_args)
+                .toIValue()
+                .toInt() == 13);
+      });
+      foo.join();
+    }
+    AT_ASSERT(
+        I.global("libtest_deploy_lib", "get_bar_destructed")(no_args)
+            .toIValue()
+            .toInt() == 1);
+    I.global("libtest_deploy_lib", "set_bar")({12});
+  }
+}
+
+int main(int argc, char* argv[]) {
+  test_shared_library_load();
+  // run_my_stuff();
   //  ::testing::InitGoogleTest(&argc, argv);
   //  int rc = RUN_ALL_TESTS();
   return 0;

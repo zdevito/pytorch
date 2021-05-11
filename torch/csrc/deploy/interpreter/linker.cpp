@@ -305,6 +305,8 @@ struct TLSSegment {
     if (!start) {
       start = malloc(mem_size_);
       memcpy(start, initalization_image_, file_size_);
+      memset(
+          (void*)((const char*)start + file_size_), 0, mem_size_ - file_size_);
       pthread_setspecific(tls_key_, start);
     }
     return (void*)((const char*)start + offset);
@@ -1107,6 +1109,7 @@ struct ElfFile {
   }
 
   ~ElfFile() {
+    std::cout << "LINKER IS UNLOADING: " << name_ << "\n";
     if (initialized_) {
       finalize();
     }
@@ -1160,7 +1163,7 @@ void printit(const std::vector<std::string>& strs) {
   std::cout << "}\n";
 }
 
-std::vector<std::unique_ptr<ElfFile>> loaded_files_;
+std::vector<ElfFile*> loaded_files_;
 
 static void* deploy_self = nullptr;
 
@@ -1176,7 +1179,11 @@ extern "C" dl_funcptr _PyImport_FindSharedFuncptr(
     const char* pathname,
     FILE* fp) {
   char* args[] = {"deploy"};
-  loaded_files_.emplace_back(std::make_unique<ElfFile>(pathname, 1, args));
+  // XXX: loaded_files_ never gets destroyed, so dtors of the library are never
+  // run this is because it is hard to get loaded_files_ to happen at the right
+  // place in library unload in particular, thread exits for threads created
+  // before this library were loaded will happen after this list is destructed.
+  loaded_files_.emplace_back(new ElfFile(pathname, 1, args));
   ElfFile& lib = *loaded_files_.back();
   lib.add_system_library(deploy_self);
   lib.load();
@@ -1184,5 +1191,6 @@ extern "C" dl_funcptr _PyImport_FindSharedFuncptr(
   ss << prefix << "_" << shortname;
   auto r = (dl_funcptr)lib.sym(ss.str().c_str());
   assert(r);
+  // std::cout << "LOADED " << pathname << "\n";
   return r;
 }
