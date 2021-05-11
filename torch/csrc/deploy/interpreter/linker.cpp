@@ -54,6 +54,20 @@
 
 #include <c10/util/Optional.h>
 
+#include <fmt/format.h>
+
+struct DeployLinkerError : public std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+#define DEPLOY_ERROR(msg_fmt, ...) \
+  throw DeployLinkerError(fmt::format(msg_fmt, ##__VA_ARGS__))
+
+#define DEPLOY_CHECK(cond, fmt, ...)  \
+  if (!(cond)) {                      \
+    DEPLOY_ERROR(fmt, ##__VA_ARGS__); \
+  }
+
 std::vector<std::string> split_path(const std::string& s, char delim) {
   const char* cur = s.c_str();
   const char* end = cur + s.size();
@@ -176,8 +190,8 @@ size_t phdr_table_get_load_size(
    MAYBE_MAP_FLAG((x), PF_R, PROT_READ) | \
    MAYBE_MAP_FLAG((x), PF_W, PROT_WRITE))
 
-// holds a pre-computed hash for a string that is used in a GNU-style hash tables
-// and also keeps track of the string length.
+// holds a pre-computed hash for a string that is used in a GNU-style hash
+// tables and also keeps track of the string length.
 struct GnuHash {
   GnuHash(const char* name) {
     uint32_t h = 5381;
@@ -202,24 +216,31 @@ static void check_errno(bool success) {
   }
 }
 
-// this is a special builtin in the libc++ API used for telling C++ execption frame
-// unwinding about functions loaded from a pathway other than the libc loader.
-// it is passed a pointer to where the EH_FRAME section was loaded, which appears
-// to include frame information relative to that address.
+// this is a special builtin in the libc++ API used for telling C++ execption
+// frame unwinding about functions loaded from a pathway other than the libc
+// loader. it is passed a pointer to where the EH_FRAME section was loaded,
+// which appears to include frame information relative to that address.
 extern "C" void __register_frame(void*);
 
 // Memory maps a file into the address space read-only, and manages the lifetime
 // of the mapping. Used in the loader to read in initial image, and to inspect
 // ELF files for dependencies before callling dlopen.
 struct MemFile {
-  MemFile(const char* filename_) :  fd_(0), mem_(nullptr), n_bytes_(0) {
+  MemFile(const char* filename_) : fd_(0), mem_(nullptr), n_bytes_(0) {
     fd_ = open(filename_, O_RDONLY);
-    check_errno(fd_ != -1);
+    DEPLOY_CHECK(
+        fd_ != -1, "failed to open {}: {}", filename_, strerror(errno));
     struct stat s;
-    check_errno(-1 != fstat(fd_, &s));
+    if (-1 == fstat(fd_, &s)) {
+      close(fd_); // destructors don't run during exceptions
+      DEPLOY_ERROR("failed to stat {}: {}", filename_, strerror(errno));
+    }
     n_bytes_ = s.st_size;
     mem_ = mmap(nullptr, n_bytes_, PROT_READ, MAP_SHARED, fd_, 0);
-    check_errno(MAP_FAILED != mem_);
+    if (MAP_FAILED == mem_) {
+      close(fd_);
+      DEPLOY_ERROR("failed to mmap {}: {}", filename_, strerror(errno));
+    }
   }
   MemFile(const MemFile&) = delete;
   const char* data() const {
@@ -227,10 +248,10 @@ struct MemFile {
   }
   ~MemFile() {
     if (mem_) {
-      check_errno(0 == munmap((void*)mem_, n_bytes_));
+      munmap((void*)mem_, n_bytes_);
     }
     if (fd_) {
-      check_errno(0 == close(fd_));
+      close(fd_);
     }
   }
   size_t size() {
@@ -245,17 +266,14 @@ struct MemFile {
   void* mem_;
   size_t n_bytes_;
 };
-template <typename... Args>
-void error(const char* format, Args... args) {
-  throw std::runtime_error(stringf(format, args...));
-}
 
 typedef void (*linker_dtor_function_t)();
 typedef void (*linker_ctor_function_t)(int, char**, char**);
 
 // https://refspecs.linuxfoundation.org/LSB_2.1.0/LSB-Core-generic/LSB-Core-generic/ehframehdr.html
-// note that eh_frame_ptr can be different types based on eh_frame_ptr_enc but we only support one
-// sepecific encoding that is stored in a int32_t and an offset relative to the start of this struct.
+// note that eh_frame_ptr can be different types based on eh_frame_ptr_enc but
+// we only support one sepecific encoding that is stored in a int32_t and an
+// offset relative to the start of this struct.
 struct EH_Frame_HDR {
   char version;
   char eh_frame_ptr_enc;
@@ -270,19 +288,19 @@ struct EH_Frame_HDR {
 extern "C" void* __tls_get_addr(void*);
 
 // This object performs TLS emulation for modules not loaded by dlopen.
-// Normally modules have a module_id that is used as a key in libc for the thread local
-// data for that module. However, there is no public API for assigning this module id.
-// Instead, for modules that we load, we set module_id to a pointer to a TLSSegment object,
-// and replace __tls_get_addr with a function that calls `addr`.
-
+// Normally modules have a module_id that is used as a key in libc for the
+// thread local data for that module. However, there is no public API for
+// assigning this module id. Instead, for modules that we load, we set module_id
+// to a pointer to a TLSSegment object, and replace __tls_get_addr with a
+// function that calls `addr`.
 struct TLSSegment {
   TLSSegment() {
     int r = pthread_key_create(&tls_key_, free);
     assert(r == 0);
   }
   void* addr(size_t offset) {
-    // this was a TLS entry for one of our modules, so we use pthreads to emulate
-    // thread local state.
+    // this was a TLS entry for one of our modules, so we use pthreads to
+    // emulate thread local state.
     void* start = pthread_getspecific(tls_key_);
     if (!start) {
       start = malloc(mem_size_);
@@ -306,20 +324,23 @@ struct TLSSegment {
 // a system with enough RAM to do that.
 constexpr size_t TLS_LOCAL_FLAG = (1ULL << 63);
 struct TLSIndex {
-  size_t module_id; // if module_id & TLS_LOCAL_FLAG, then module_id & ~TLS_LOCAL_FLAG is a TLSSegment*;
+  size_t module_id; // if module_id & TLS_LOCAL_FLAG, then module_id &
+                    // ~TLS_LOCAL_FLAG is a TLSSegment*;
   size_t offset;
 };
 
 static void* local__tls_get_addr(TLSIndex* idx) {
   if ((idx->module_id & TLS_LOCAL_FLAG) != 0) {
-    return ((TLSSegment*) (idx->module_id & ~TLS_LOCAL_FLAG))->addr(idx->offset);
+    return ((TLSSegment*)(idx->module_id & ~TLS_LOCAL_FLAG))->addr(idx->offset);
   }
   return __tls_get_addr(idx);
 }
 
-/* GDB puts a breakpoint in this function.  */
+/* LLDB puts a breakpoint in this function, and reads __deploy_module_info to
+ * get debug info from library.  */
 __attribute__((noinline)) void __deploy_register_code() {
-  std::cout << "";
+  std::cout << ""; // otherwise the breakpoint doesn't get hit, not sure if
+                   // there is a more stable way of doing this.
 };
 
 struct DeployModuleInfo {
@@ -333,6 +354,7 @@ extern "C" {
   DeployModuleInfo __deploy_module_info;
 }
 
+// RAII wrapper around dlopen
 struct SystemLibrary {
   SystemLibrary()
   : SystemLibrary(RTLD_DEFAULT, false) {}
@@ -381,6 +403,8 @@ struct SystemLibrary {
   bool own_handle_;
 };
 
+// reads DT_NEEDED and DT_RUNPATH from an unloaded elf file so we can sort out
+// dependencies before calling dlopen
 std::pair<const char*, std::vector<const char*>> load_needed_from_elf_file(const char* filename, const char* data) {
   auto header_ = (Elf64_Ehdr*) data;
   auto program_headers = (Elf64_Phdr*)(data + header_->e_phoff);
@@ -390,11 +414,13 @@ std::pair<const char*, std::vector<const char*>> load_needed_from_elf_file(const
     const Elf64_Phdr* phdr = &program_headers[i];
     if (phdr->p_type == PT_DYNAMIC) {
       dynamic = reinterpret_cast<const Elf64_Dyn*>(data + phdr->p_offset);
+      break;
     }
   }
-  if (!dynamic) {
-    error("%s: could not load dynamic section for looking up DT_NEEDED", filename);
-  }
+  DEPLOY_CHECK(
+      dynamic,
+      "{}: could not load dynamic section for looking up DT_NEEDED",
+      filename);
 
   const char* runpath = "";
   std::vector<const char*> needed;
@@ -413,10 +439,7 @@ std::pair<const char*, std::vector<const char*>> load_needed_from_elf_file(const
     }
   }
 
-
-  if (!strtab) {
-    error("%s: could not load dynstr for DT_NEEDED", filename);
-  }
+  DEPLOY_CHECK(strtab, "{}: could not load dynstr for DT_NEEDED", filename);
 
   for (const Elf64_Dyn* d = dynamic; d->d_tag != DT_NULL; ++d) {
     switch (d->d_tag) {
@@ -436,6 +459,8 @@ std::pair<const char*, std::vector<const char*>> load_needed_from_elf_file(const
   return std::make_pair(runpath, std::move(needed));
 }
 
+// common mechanism for reading the elf symbol table,
+// and other information in the PT_DYNAMIC segment.
 struct ElfDynamicInfo {
   std::string name_;
   const Elf64_Dyn* dynamic_;
@@ -556,9 +581,9 @@ struct ElfDynamicInfo {
     }
 
     if (!gnu_bucket_) {
-      std::cout
-          << name_
-          << ": no DT_GNU_HASH section, I don't know how to read DT_HASH... symbol lookup will fail";
+      std::cout << fmt::format(
+          "{}: warning, no DT_GNU_HASH found, symbol lookups on this module will not find anything.\n",
+          name_);
     }
 
     // pass 2 for things that require the strtab_ to be loaded
@@ -577,7 +602,9 @@ struct ElfDynamicInfo {
     }
   }
 
-at::optional<Elf64_Addr> sym(const char* name, GnuHash* precomputed_hash = nullptr) const {
+  at::optional<Elf64_Addr> sym(
+      const char* name,
+      GnuHash* precomputed_hash = nullptr) const {
     if (!gnu_bucket_) {
       return at::nullopt; // no hashtable was loaded
     }
@@ -611,8 +638,10 @@ at::optional<Elf64_Addr> sym(const char* name, GnuHash* precomputed_hash = nullp
             memcmp(strtab_ + sym->st_name, name, name_len + 1) == 0) {
           // found the matching entry, is it defined?
           if ((ELF64_ST_BIND(sym->st_info) == STB_GLOBAL ||
-              ELF64_ST_BIND(sym->st_info) == STB_WEAK) && sym->st_shndx != 0) {
-            return sym->st_value + ((ELF64_ST_TYPE(sym->st_info) == STT_TLS) ? 0 : load_bias_);
+               ELF64_ST_BIND(sym->st_info) == STB_WEAK) &&
+              sym->st_shndx != 0) {
+            return sym->st_value +
+                ((ELF64_ST_TYPE(sym->st_info) == STT_TLS) ? 0 : load_bias_);
           }
           // symbol isn't defined
           return at::nullopt;
@@ -624,6 +653,10 @@ at::optional<Elf64_Addr> sym(const char* name, GnuHash* precomputed_hash = nullp
   }
 };
 
+// for resolving TLS offsets we need to look through
+// libc's already loaded libraries. We do not have the whole
+// ELF file mapped in this case just a pointer to the program headers and
+// the load_bias (offset in memory) where the library was loaded.
 struct AlreadyLoadedSymTable {
  private:
   ElfDynamicInfo dyninfo_;
@@ -645,9 +678,8 @@ struct AlreadyLoadedSymTable {
         break;
       }
     }
-    if (!dynamic) {
-      error("%s couldn't find PT_DYNAMIC", name, load_bias);
-    }
+    DEPLOY_CHECK(
+        dynamic, "%s: couldn't find PT_DYNAMIC in already loaded table.", name);
     dyninfo_.initialize_from_dynamic_section(name, dynamic, load_bias, true);
   }
 
@@ -661,26 +693,41 @@ static int iterate_cb(struct dl_phdr_info * info, size_t size, void * data) {
   return (*fn)(info, size);
 }
 
+// we need to find a TLS offset / module_id pair for a symbol which we cannot do
+// with a normal dlsym call. Instead we iterate through all loaded libraries and
+// check their symbol tables for the symbol. The value of the symbol is the TLS
+// offset. When we find the library we also get the module id.
 bool slow_find_tls_symbol_offset(const char* sym_name, TLSIndex* result) {
-    bool found = false;
-    std::function<int(struct dl_phdr_info *,size_t)> cb = [&](struct dl_phdr_info * info, size_t size) {
-    // std::cout << "SEARCHING .. " << info->dlpi_name << "\n";
-    AlreadyLoadedSymTable symtable(info->dlpi_name, info->dlpi_addr, info->dlpi_phdr, info->dlpi_phnum);
-    auto sym_addr = symtable.sym(sym_name);
-    if (sym_addr) {
-      // std::cout << "FOUND IT IN: " << info->dlpi_name << " it has modid: " << info->dlpi_tls_modid << "\n";
-      result->module_id = info->dlpi_tls_modid;
-      result->offset = *sym_addr;
-      found = true;
-      return 1;
-    }
-    return 0;
-  };
+  bool found = false;
+  std::function<int(struct dl_phdr_info*, size_t)> cb =
+      [&](struct dl_phdr_info* info, size_t size) {
+        // std::cout << "SEARCHING .. " << info->dlpi_name << "\n";
+        AlreadyLoadedSymTable symtable(
+            info->dlpi_name,
+            info->dlpi_addr,
+            info->dlpi_phdr,
+            info->dlpi_phnum);
+        auto sym_addr = symtable.sym(sym_name);
+        if (sym_addr) {
+          // std::cout << "FOUND IT IN: " << info->dlpi_name << " it has modid:
+          // " << info->dlpi_tls_modid << "\n";
+          result->module_id = info->dlpi_tls_modid;
+          result->offset = *sym_addr;
+          found = true;
+          return 1;
+        }
+        return 0;
+      };
 
   dl_iterate_phdr(iterate_cb, (void*)&cb);
   return found;
 }
 
+// dlopen does not accept additional search paths as an argument.
+// however, normal DT_NEEDED library load inherits the runpath of parents.
+// So we need to pre-find all the libraries and call dlopen on them directly to
+// get the same behavior. We can find the dependencies by reading the libraries
+// dynamic section for recursive DT_NEEED entries.
 void resolve_needed_libraries(std::vector<SystemLibrary>& system_libraries,
     const std::string& origin_relative,
     std::vector<std::string>& search_path,
@@ -732,8 +779,9 @@ void resolve_needed_libraries(std::vector<SystemLibrary>& system_libraries,
       }
     }
 
-    std::vector<SystemLibrary> sublibraries; // these need to say loaded until we open library_path
-                                             // otherwise we might dlclose a sublibary
+    std::vector<SystemLibrary>
+        sublibraries; // these need to say loaded until we open library_path
+                      // otherwise we might dlclose a sublibrary
 
     if (library_path != "") {
       // std::cout << "LOOKING FOR SUBLIBRARIES FOR FILE AT PATH " << library_path << "\n";
@@ -746,14 +794,18 @@ void resolve_needed_libraries(std::vector<SystemLibrary>& system_libraries,
     }
 
     // either we didn't find the file, or we have already loaded its deps
-    // in both cases, we now try to call dlopen. In the case where we didn't find the file, we hope that
-    // some like LD_LIBRARY_PATH knows where it is. In the case where we found it, we know its deps are loaded and resolved.
+    // in both cases, we now try to call dlopen. In the case where we didn't
+    // find the file, we hope that something like LD_LIBRARY_PATH knows where it
+    // is. In the case where we found it, we know its deps are loaded and
+    // resolved.
 
     // std::cout << "OPENING " << library_path << "\n";
     SystemLibrary try_open(library_path.c_str(), base_flags);
-    if (!try_open.loaded()) {
-      error("%s: could not load library, dlopen says: %s", name, try_open.last_error());
-    }
+    DEPLOY_CHECK(
+        try_open.loaded(),
+        "{}: could not load library, dlopen says: {}",
+        name,
+        try_open.last_error());
     system_libraries.emplace_back(std::move(try_open));
   }
 
@@ -832,17 +884,15 @@ struct ElfFile {
       Elf64_Addr file_length = file_end - file_page_start;
 
       if (contents_.size() <= 0) {
-        error(
-            "\"%s\" invalid file size: %" PRId64,
-            name_.c_str(),
-            contents_.size());
+        DEPLOY_ERROR(
+            "\"{}\" invalid file size: {}", name_.c_str(), contents_.size());
       }
 
       if (file_end > contents_.size()) {
-        error(
-            "invalid ELF file \"%s\" load segment[%zd]:"
-            " p_offset (%p) + p_filesz (%p) ( = %p) past end of file "
-            "(0x%" PRIx64 ")",
+        DEPLOY_ERROR(
+            "invalid ELF file \"{}\" load segment[{}]:"
+            " p_offset ({}) + p_filesz ({}) ( = {}) past end of file "
+            "({})",
             name_.c_str(),
             i,
             reinterpret_cast<void*>(phdr->p_offset),
@@ -862,8 +912,8 @@ struct ElfFile {
             contents_.fd(),
             file_page_start);
         if (seg_addr == MAP_FAILED) {
-          error(
-              "couldn't map \"%s\" segment %zd: %s",
+          DEPLOY_ERROR(
+              "couldn't map \"{}\" segment {}: {}",
               name_.c_str(),
               i,
               strerror(errno));
@@ -895,8 +945,8 @@ struct ElfFile {
             -1,
             0);
         if (zeromap == MAP_FAILED) {
-          error(
-              "couldn't zero fill \"%s\" gap: %s",
+          DEPLOY_ERROR(
+              "couldn't zero fill \"{}\" gap: {}",
               name_.c_str(),
               strerror(errno));
         }
@@ -909,7 +959,6 @@ struct ElfFile {
     std::vector<std::string> empty_search_path;
     resolve_needed_libraries(system_libraries_, name_, empty_search_path, dyninfo_.runpath_, dyninfo_.needed_);
   }
-
 
   at::optional<Elf64_Addr> lookup_symbol(const char* name) {
     for (const auto& sys_lib : system_libraries_) {
@@ -948,7 +997,10 @@ struct ElfFile {
           // "\n";
           return;
         } else {
-          error("%s: '%s' symbol not found in ElfFile lookup", name_.c_str(), sym_name);
+          DEPLOY_ERROR(
+              "{}: '{}' symbol not found in ElfFile lookup",
+              name_.c_str(),
+              sym_name);
         }
       }
     }
@@ -981,19 +1033,20 @@ struct ElfFile {
         if (sym_addr && dyninfo_.sym(sym_name) != sym_addr) {
           TLSIndex entry;
           if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
-            error("%s: FAILED TO FIND TLS ENTRY", sym_name);
+            DEPLOY_ERROR("{}: FAILED TO FIND TLS ENTRY {}", name_, sym_name);
           }
           *static_cast<size_t*>(rel_target) = entry.module_id;
         } else {
-          size_t tls_ptr_as_number = (size_t) &tls_;
-          *static_cast<size_t*>(rel_target) = tls_ptr_as_number | TLS_LOCAL_FLAG;
+          size_t tls_ptr_as_number = (size_t)&tls_;
+          *static_cast<size_t*>(rel_target) =
+              tls_ptr_as_number | TLS_LOCAL_FLAG;
         }
       } break;
       case R_X86_64_DTPOFF64: {
         if (sym_addr && dyninfo_.sym(sym_name) != sym_addr) {
           TLSIndex entry;
           if (!slow_find_tls_symbol_offset(sym_name, &entry)) {
-            error("%s: FAILED TO FIND TLS ENTRY", sym_name);
+            DEPLOY_ERROR("{}: FAILED TO FIND TLS ENTRY {}", name_, sym_name);
           }
           *static_cast<Elf64_Addr*>(rel_target) = entry.offset + reloc.r_addend;
         } else {
@@ -1002,7 +1055,7 @@ struct ElfFile {
         }
       } break;
       default:
-        error("unknown reloc type %d in \"%s\"", r_type, name_.c_str());
+        DEPLOY_ERROR("unknown reloc type {} in \"{}\"", r_type, name_.c_str());
         break;
     }
   }
@@ -1073,10 +1126,11 @@ struct ElfFile {
   }
 
   void* sym(const char* name) const {
-    return (void*) dyninfo_.sym(name).value_or(0);
+    return (void*)dyninfo_.sym(name).value_or(0);
   }
 
  private:
+  MemFile contents_;
   const char* data_;
   const Elf64_Ehdr* header_;
   const Elf64_Phdr* program_headers_;
@@ -1088,14 +1142,11 @@ struct ElfFile {
   Elf64_Addr load_bias_;
   Elf64_Dyn* dynamic_;
   ElfDynamicInfo dyninfo_;
-  MemFile contents_;
   std::string name_;
   int argc_;
   char** argv_;
   bool initialized_ = false;
-
   TLSSegment tls_;
-
   std::vector<SystemLibrary> system_libraries_;
 };
 
